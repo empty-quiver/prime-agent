@@ -525,7 +525,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
 			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
@@ -875,6 +874,7 @@ function createClient(
 
 	if (model.provider === "cloudflare-ai-gateway") {
 		const client = new Anthropic({
+			maxRetries: 0,
 			apiKey: null,
 			authToken: null,
 			baseURL: resolveCloudflareBaseUrl(model),
@@ -898,6 +898,7 @@ function createClient(
 
 	if (model.provider === "github-copilot") {
 		const client = new Anthropic({
+			maxRetries: 0,
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
@@ -919,6 +920,7 @@ function createClient(
 
 	if (isOAuthToken(apiKey)) {
 		const client = new Anthropic({
+			maxRetries: 0,
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
@@ -940,6 +942,7 @@ function createClient(
 	}
 
 	const client = new Anthropic({
+		maxRetries: 0,
 		apiKey,
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
