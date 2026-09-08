@@ -4,16 +4,18 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import type { AgentSession } from "./agent-session.js";
 import { DurableInbox } from "./durable-inbox.js";
+import { DurableOutbox } from "./durable-outbox.js";
 import { ExecutionBudget } from "./execution-budget.js";
 import { acquireSessionLease, SESSION_LEASES_ENABLED_ENV, type SessionLease } from "./session-lease.js";
 
 export interface SupervisorAnchor {
-	version: 1;
+	version: 2;
 	sessionId: string;
 	sessionFile: string;
 	budgetId: string;
 	budgetFile: string;
 	inboxId: string;
+	outboxId: string;
 }
 
 function containedPath(root: string, value: string): string {
@@ -42,9 +44,20 @@ export async function initializeSupervisorAnchor(path: string, session: AgentSes
 		mkdirSync(inboxDirectory, { mode: 0o700 });
 		const inboxId = randomUUID();
 		writeFileAtomicSync(inboxIdentity, JSON.stringify(inboxId), { mode: 0o600, fsync: true, fsyncDir: true });
+		const outboxDirectory = resolve(root, "outbox");
+		if (existsSync(outboxDirectory))
+			throw new Error("Outbox already exists; reconcile initialization before retrying");
+		mkdirSync(outboxDirectory, { mode: 0o700 });
+		const outboxId = randomUUID();
+		writeFileAtomicSync(resolve(outboxDirectory, ".identity"), JSON.stringify(outboxId), {
+			mode: 0o600,
+			fsync: true,
+			fsyncDir: true,
+		});
 		const anchor: SupervisorAnchor = {
-			version: 1,
+			version: 2,
 			inboxId,
+			outboxId,
 			sessionId: session.sessionId,
 			sessionFile: relative(root, realpathSync(sessionFile)),
 			budgetId: state.id,
@@ -78,6 +91,7 @@ export class SessionSupervisor {
 	private constructor(
 		readonly session: AgentSession,
 		readonly inbox: DurableInbox,
+		readonly outbox: DurableOutbox,
 		private readonly budget: ExecutionBudget,
 		private readonly lease: SessionLease | undefined,
 		private readonly maxSilentMs: number,
@@ -89,7 +103,7 @@ export class SessionSupervisor {
 
 	static async open(
 		path: string,
-		create: (sessionFile: string, budget: ExecutionBudget) => Promise<AgentSession>,
+		create: (sessionFile: string, budget: ExecutionBudget, outbox: DurableOutbox) => Promise<AgentSession>,
 		maxSilentMs = 600_000,
 	): Promise<SessionSupervisor> {
 		if (!Number.isSafeInteger(maxSilentMs) || maxSilentMs < 1000 || maxSilentMs > 86_400_000)
@@ -97,13 +111,14 @@ export class SessionSupervisor {
 		const root = realpathSync(dirname(path));
 		const lease = acquireSessionLease(path, root, { [SESSION_LEASES_ENABLED_ENV]: "true" });
 		let inbox: DurableInbox | undefined;
+		let outbox: DurableOutbox | undefined;
 		let budget: ExecutionBudget | undefined;
 		let session: AgentSession | undefined;
 		try {
 			const anchor: SupervisorAnchor = JSON.parse(readFileSync(path, "utf8"));
 			if (
 				!anchor ||
-				anchor.version !== 1 ||
+				anchor.version !== 2 ||
 				typeof anchor.sessionId !== "string" ||
 				!anchor.sessionId ||
 				typeof anchor.budgetId !== "string" ||
@@ -125,11 +140,20 @@ export class SessionSupervisor {
 			inbox = new DurableInbox(resolve(root, "inbox"));
 			if (inbox.issues.length)
 				throw new Error("Inbox delivery outcome unknown; reconcile before supervisor startup");
+			if (
+				typeof anchor.outboxId !== "string" ||
+				!anchor.outboxId ||
+				JSON.parse(readFileSync(resolve(root, "outbox", ".identity"), "utf8")) !== anchor.outboxId
+			)
+				throw new Error("Supervisor outbox identity missing or changed");
+			outbox = new DurableOutbox(resolve(root, "outbox"));
+			if (outbox.issues.length)
+				throw new Error("Outbound send outcome unknown; reconcile before supervisor startup");
 			// The factory constructs the saved session; it must not submit work or start external intake.
-			session = await create(sessionFile, budget);
+			session = await create(sessionFile, budget, outbox);
 			if (session.sessionId !== anchor.sessionId || session.executionBudget !== budget)
 				throw new Error("Supervisor session or budget identity changed");
-			const supervisor = new SessionSupervisor(session, inbox, budget, lease, maxSilentMs);
+			const supervisor = new SessionSupervisor(session, inbox, outbox, budget, lease, maxSilentMs);
 			if (supervisor.health().state !== "needs_reconciliation" && !budget.signal.aborted) {
 				await session.bindExtensions({});
 				session.resumeWait();
@@ -139,6 +163,7 @@ export class SessionSupervisor {
 			// Failed cleanup keeps both ownership leases quarantined in this process.
 			if (session) await session.disposeAsync({ kernelSnapshot: false });
 			inbox?.dispose();
+			outbox?.dispose();
 			budget?.dispose();
 			lease?.release();
 			throw error;
@@ -168,12 +193,15 @@ export class SessionSupervisor {
 			this.session.recoveryError ||
 			this.inbox.issues.length ||
 			this.inbox.error ||
+			this.outbox.issues.length ||
+			this.outbox.error ||
 			this.session.waitError ||
 			(wait?.status === "delivering" && !busy)
 		) {
 			state = "needs_reconciliation";
 			reason =
 				this.session.recoveryError ??
+				this.outbox.error ??
 				this.session.waitError ??
 				this.inbox.error ??
 				"An interrupted operation or wake has an unknown outcome";
@@ -213,6 +241,7 @@ export class SessionSupervisor {
 		await this.session.disposeAsync({ kernelSnapshot: false });
 		this.unsubscribe();
 		this.inbox.dispose();
+		this.outbox.dispose();
 		this.budget.dispose();
 		this.lease?.release();
 	}

@@ -53,6 +53,11 @@ export class DurableInbox {
 	get error(): string | undefined {
 		return this.fault?.message;
 	}
+	lookup(id: string): InboxRecord | undefined {
+		this.assertActive();
+		const file = this.file(id);
+		return existsSync(join(this.directory, file)) ? this.read(file) : undefined;
+	}
 
 	receive(id: string, text: string): "accepted" | "duplicate" {
 		this.assertActive();
@@ -73,12 +78,15 @@ export class DurableInbox {
 		return "accepted";
 	}
 
-	async dispatchNext(deliver: (record: InboxRecord) => Promise<void>): Promise<boolean> {
+	async dispatchNext(deliver: (record: InboxRecord) => Promise<void>, id?: string): Promise<boolean> {
 		this.assertActive();
 		if (this.dispatching) return false;
 		if (this.issues.length) throw new Error("Inbox delivery outcome unknown; reconcile before dispatch");
-		const next = [...this.pending.values()].find((record) => record.status === "received");
-		if (!next) return false;
+		const next =
+			id === undefined
+				? [...this.pending.values()].find((record) => record.status === "received")
+				: this.pending.get(id);
+		if (!next || next.status !== "received") return false;
 		this.dispatching = true;
 		try {
 			this.save({ ...next, status: "dispatching" });

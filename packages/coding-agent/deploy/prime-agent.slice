@@ -1,0 +1,8 @@
+[Unit]
+Description=Aggregate Prime Agent worker and kernel limits
+
+[Slice]
+MemoryHigh=7G
+MemoryMax=8G
+MemorySwapMax=1G
+TasksMax=2048

@@ -8,6 +8,7 @@ import { createAgentSession } from "../core/sdk.js";
 import { SessionManager } from "../core/session-manager.js";
 import { SessionSupervisor } from "../core/session-supervisor.js";
 import { followSignalIntake, type SignalIntakeConfig } from "../core/signal-intake.js";
+import { createSignalSendTool, type SignalSendConfig } from "../core/signal-send.js";
 import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import { sleep } from "../utils/sleep.js";
 
@@ -20,6 +21,7 @@ interface Config {
 	sourceRoot: string;
 	maxSilentMs?: number;
 	signal?: SignalIntakeConfig;
+	signalOutbound?: SignalSendConfig;
 }
 
 const abort = new AbortController();
@@ -72,13 +74,14 @@ try {
 	process.env.PRIME_AGENT_PINNED_SOURCE_ROOT = config.sourceRoot;
 	supervisor = await SessionSupervisor.open(
 		config.anchor,
-		async (file, budget) =>
+		async (file, budget, outbox) =>
 			(
 				await createAgentSession({
 					cwd: config.cwd,
 					agentDir: config.agentDir,
 					sessionManager: SessionManager.open(file),
 					executionBudget: budget,
+					customTools: config.signalOutbound ? [createSignalSendTool(config.signalOutbound, outbox)] : [],
 					prewarmIpythonKernel: false,
 				})
 			).session,

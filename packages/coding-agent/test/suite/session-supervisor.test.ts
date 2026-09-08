@@ -136,3 +136,29 @@ it("pauses unfinished operations and distinguishes durable waiting from active n
 		harness.cleanup();
 	}
 });
+
+it("refuses an uncertain or missing outbound journal before model startup", async () => {
+	const { harness, path } = await seed();
+	let supervisor: SessionSupervisor | undefined;
+	try {
+		await harness.session.disposeAsync();
+		supervisor = await SessionSupervisor.open(path, factory(harness));
+		await expect(
+			supervisor.outbox.send("send-one", "synthetic payload", async () => {
+				throw new Error("lost acknowledgment");
+			}),
+		).rejects.toThrow("lost acknowledgment");
+		expect(supervisor.health().state).toBe("needs_reconciliation");
+		await supervisor.close();
+		supervisor = undefined;
+		const create = vi.fn(factory(harness));
+		await expect(SessionSupervisor.open(path, create)).rejects.toThrow("Outbound send outcome unknown");
+		expect(create).not.toHaveBeenCalled();
+		rmSync(join(harness.tempDir, "outbox", ".identity"));
+		await expect(SessionSupervisor.open(path, create)).rejects.toThrow();
+		expect(create).not.toHaveBeenCalled();
+	} finally {
+		await supervisor?.close();
+		harness.cleanup();
+	}
+});

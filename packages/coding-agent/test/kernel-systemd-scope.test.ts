@@ -47,11 +47,18 @@ setInterval(() => {}, 1000);`;
 			child.once("error", reject);
 			child.once("exit", () => reject(new Error("Kernel fixture exited before reporting its child")));
 		});
+		void output.catch(() => undefined);
 		try {
 			await ownershipReady;
 			const pid = await output;
 			expect(Number.isInteger(pid)).toBe(true);
 			const original = readFileSync(`/proc/${pid}/stat`, "utf8");
+			const cgroup = readFileSync(`/proc/${pid}/cgroup`, "utf8").trim().split("0::")[1];
+			expect(readFileSync(join("/sys/fs/cgroup", cgroup, "memory.max"), "utf8").trim()).toBe(String(2 * 1024 ** 3));
+			expect(readFileSync(join("/sys/fs/cgroup", cgroup, "pids.max"), "utf8").trim()).toBe("256");
+			expect(readFileSync(join("/sys/fs/cgroup", cgroup, "memory.oom.group"), "utf8").trim()).toBe("1");
+			if (process.env.PRIME_AGENT_RESOURCE_SLICE)
+				expect(cgroup).toContain(`/${process.env.PRIME_AGENT_RESOURCE_SLICE}/`);
 			await terminateOwnedChild(child);
 			expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
 			try {

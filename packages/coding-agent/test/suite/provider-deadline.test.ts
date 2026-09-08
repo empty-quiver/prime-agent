@@ -1,6 +1,7 @@
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
 import { ExecutionBudget } from "../../src/core/execution-budget.js";
+import type { RlmChildFailureDetails } from "../../src/core/messages.js";
 import { completeWithProviderRetry, providerStreamFailureKind } from "../../src/core/provider-retry.js";
 import { startSideQuestion } from "../../src/core/side-question.js";
 import { createHarness } from "./harness.js";
@@ -94,3 +95,40 @@ it("charges side questions against the parent's host budget", async () => {
 		harness.cleanup();
 	}
 });
+
+it.each(["timeout", "worker_crash", "provider_failure"] as const)(
+	"retains a structured %s child outcome without authorizing repetition",
+	async (kind) => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { retry: { enabled: false }, compaction: { enabled: false } },
+		});
+		try {
+			const response = fauxAssistantMessage("", { stopReason: "error", errorMessage: "synthetic failure" });
+			response.diagnostics = [
+				{
+					type: kind === "worker_crash" ? "agent_lifecycle_failure" : "provider_stream_failure",
+					timestamp: Date.now(),
+					details: { kind },
+				},
+			];
+			harness.setResponses([response]);
+			await harness.session.runRlmChild("classified failure");
+			await vi.waitFor(() => {
+				const message = harness.session.messages.find(
+					(entry) => entry.role === "custom" && entry.customType === "rlm_child_failure",
+				);
+				expect(message?.role).toBe("custom");
+				if (message?.role === "custom")
+					expect((message.details as RlmChildFailureDetails).failure).toEqual({
+						kind,
+						outcome: kind === "provider_failure" ? "failed" : "unknown",
+						retrySafe: false,
+					});
+			});
+		} finally {
+			await harness.session.disposeAsync();
+			harness.cleanup();
+		}
+	},
+);

@@ -193,6 +193,7 @@ import {
 	isSessionSlashCommandMessage,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+	type RlmChildFailureDetails,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { OperationJournal, type OperationRecord } from "./operation-journal.js";
@@ -10989,6 +10990,11 @@ export class AgentSession {
 		// Admission is not completion: keep an intent for the entire detached lifetime.
 		const childReceipt = await this._operationJournal.beforeTool(`child:${childNodeId}`, "rlm.run child");
 		let childOutcome: "succeeded" | "failed" | "unknown" = "unknown";
+		let childFailure: NonNullable<RlmChildFailureDetails["failure"]> = {
+			kind: "startup_failure",
+			outcome: "unknown",
+			retrySafe: false,
+		};
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		if (parentAssistantForUsage && !this._rlmDurableParentUsage.has(parentAssistantForUsage)) {
@@ -11171,6 +11177,7 @@ export class AgentSession {
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
 				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+				childFailure = { kind: "worker_crash", outcome: "unknown", retrySafe: false };
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 				if (child.sessionName !== sessionName) child.setSessionName(sessionName);
@@ -11277,7 +11284,12 @@ export class AgentSession {
 					const kind =
 						terminal.stopReason === "aborted"
 							? "cancelled"
-							: (providerStreamFailureKind(terminal) ?? "provider_failure");
+							: isAgentLifecycleFailure(terminal)
+								? "worker_crash"
+								: providerStreamFailureKind(terminal) === "timeout"
+									? "timeout"
+									: "provider_failure";
+					childFailure = { kind, outcome: kind === "provider_failure" ? "failed" : "unknown", retrySafe: false };
 					if (kind === "provider_failure") childOutcome = "failed";
 					throw new Error(`${kind}: ${terminal.errorMessage ?? "Child did not complete successfully"}`);
 				}
@@ -11317,6 +11329,7 @@ export class AgentSession {
 				childOutcome = "succeeded";
 			} catch (error) {
 				const runError = error instanceof Error ? error : new Error(String(error));
+				if (run.status === "cancelled") childFailure = { kind: "cancelled", outcome: "unknown", retrySafe: false };
 				run.publication.reject(runError);
 				if (run.status !== "cancelled") {
 					run.status = "error";
@@ -11347,6 +11360,7 @@ export class AgentSession {
 								childId: run.id,
 								sessionName,
 								error: run.error ?? "unknown error",
+								failure: childFailure,
 							}),
 						);
 					} else if (run.status === "cancelled") {

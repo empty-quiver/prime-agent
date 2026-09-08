@@ -4,3 +4,4 @@ export * from "./execution-governor.js";
 export * from "./proxy.js";
 export * from "./request-deadline.js";
 export * from "./types.js";
+export * from "./unknown-operation.js";

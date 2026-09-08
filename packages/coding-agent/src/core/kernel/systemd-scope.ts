@@ -12,7 +12,7 @@ interface ScopeIdentity {
 	invocation: string;
 	cgroup: string;
 }
-const properties = ["--property=InvocationID,ControlGroup,ActiveState,LoadState,KillMode"];
+const properties = ["--property=InvocationID,ControlGroup,ActiveState,LoadState,KillMode,Slice,MemoryMax,TasksMax"];
 
 function fields(text: string): Record<string, string> {
 	return Object.fromEntries(
@@ -85,6 +85,20 @@ export function verifySupervisorOwnership(environment: NodeJS.ProcessEnv = proce
 	) {
 		throw new Error("Kernel owner is not contained by the declared supervisor service");
 	}
+	const slice = environment.PRIME_AGENT_RESOURCE_SLICE;
+	if (slice !== undefined) {
+		if (!/^[A-Za-z0-9_.:-]+\.slice$/.test(slice) || parentState.Slice !== slice)
+			throw new Error("Supervisor is not in its configured resource slice");
+		const limits = fields(
+			execFileSync("systemctl", ["--user", "show", slice, ...properties], { encoding: "utf8", timeout: 2000 }),
+		);
+		if (
+			![limits.MemoryMax, limits.TasksMax].every(
+				(value) => /^\d+$/.test(value ?? "") && Number.isSafeInteger(Number(value)) && Number(value) > 0,
+			)
+		)
+			throw new Error("Supervisor resource slice requires finite memory and task limits");
+	}
 	return parent;
 }
 
@@ -112,6 +126,10 @@ export function spawnKernelProcess(
 			"--property=KillMode=control-group",
 			"--property=TimeoutStopSec=5s",
 			"--property=SendSIGKILL=yes",
+			"--property=MemoryMax=2G",
+			"--property=OOMPolicy=kill",
+			"--property=TasksMax=256",
+			...(environment.PRIME_AGENT_RESOURCE_SLICE ? [`--slice=${environment.PRIME_AGENT_RESOURCE_SLICE}`] : []),
 			`--property=BindsTo=${parent}`,
 			`--property=After=${parent}`,
 			"--",

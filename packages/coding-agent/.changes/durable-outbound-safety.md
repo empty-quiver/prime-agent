@@ -1,0 +1,3 @@
+- Added an opt-in, recipient-allowlisted Signal send tool with durable deduplication, bounded requests and explicit reconciliation for uncertain sends.
+- Anchored outbound journal identity in supervisor state and refused missing or interrupted outbound state before startup.
+- Added typed child failure outcomes and aggregate supervised worker/kernel memory and task containment.

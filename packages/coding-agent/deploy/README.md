@@ -28,7 +28,7 @@ Every supervised startup and kernel start verifies the sealed environment. Kerne
 
 Create or copy a complete session family, including its session artifacts. Use the SDK to open the saved session and materialize its durable budget. Call `initializeSupervisorAnchor(anchorPath, session)` from `src/core/session-supervisor.ts` **once**, while that session owns its lease, then await `session.disposeAsync()`.
 
-Place the anchor at the root of the copied family. Session and budget paths must stay inside that root. Ordinary startup refuses a missing/replaced anchor, budget or inbox identity. Initialization deliberately refuses to overwrite existing state. An interrupted initialization requires inspection; do not delete identity files to bypass it.
+Place the anchor at the root of the copied family. Session and budget paths must stay inside that root. Anchor version 2 also pins outbound journal identity. Ordinary startup refuses a missing/replaced anchor, budget, inbox or outbox identity; version 1 development anchors require explicit migration after reconciliation, not automatic regeneration. Initialization deliberately refuses to overwrite existing state. An interrupted initialization requires inspection; do not delete identity files to bypass it.
 
 Supervisor configuration uses absolute paths:
 
@@ -44,9 +44,9 @@ Supervisor configuration uses absolute paths:
 }
 ```
 
-Adapt `prime-agent-supervised.service` to the pinned checkout, Node executable, Python and config paths. Install it as a **user** service, not a system service. Kernel scopes verify their owning user-service invocation and cgroup, and bind their lifetime to it. Never start this beside another owner of the same session or another Signal intake for that session.
+Adapt `prime-agent-supervised.service` to the pinned checkout, Node executable, Python and config paths. Install it and `prime-agent.slice` as **user** units, not system units. Kernel scopes verify their owning user-service invocation and cgroup, and bind their lifetime to it. Never start this beside another owner of the same session or another Signal intake for that session.
 
-The supervisor writes `health.json` privately next to the anchor. Durable waits are healthy waiting states; active execution without progress reaches a deadline. Unknown operations or interrupted wake deliveries pause for operator reconciliation. SIGTERM requests cleanup; systemd provides final process containment if the bounded cleanup cannot finish. Kernel scopes are separate cgroups, so the template's service memory limit is not an aggregate limit across kernel scopes.
+The supervisor writes `health.json` privately next to the anchor. Durable waits are healthy waiting states; active execution without progress reaches a deadline. Unknown operations or interrupted wake deliveries pause for operator reconciliation. SIGTERM requests cleanup; systemd provides final process containment if the bounded cleanup cannot finish. The dedicated slice limits the aggregate worker and kernel memory to 8 GiB and task count to 2,048. Each kernel scope additionally has a 2 GiB/256-task cap and `OOMPolicy=kill`. Configured slice identity and finite limits are verified before kernel launch. These are containment defaults to tune against measurements, not a fix for retained-memory bugs.
 
 ## Signal intake and recovery
 
@@ -55,6 +55,8 @@ Optional `signal` config contains `url`, receiving `account`, `allowNumbers`, an
 Inbox admission is durable before dispatch. `dispatching` records recovered after a crash become `unknown`; they are not automatically resent. Use `DurableInbox.issues` and `reconcile(id, "processed" | "received", evidence)` only after checking the session and external effects. Choosing `received` explicitly authorizes another attempt. Completed tombstones omit message bodies but retain deduplication history. Capacity exhaustion fails closed rather than forgetting IDs.
 
 The [signal-cli JSON-RPC documentation](https://github.com/AsamK/signal-cli/blob/master/man/signal-cli-jsonrpc.5.adoc) documents request IDs for response correlation, not send idempotency. Do not treat a repeated JSON-RPC ID as an exactly-once send guarantee. Interrupted sends remain unknown operations requiring reconciliation. SSE also lacks durable replay acknowledgments: local deduplication cannot recover messages lost upstream of admission.
+
+Optional `signalOutbound` configuration separately specifies `url`, sending `account`, and `allowRecipients`. It enables the `signal_send` tool only for those recipients. The host uses the tool-call ID as its local durable send identity; concurrent duplicate calls and recovered acknowledged calls do not send again. This is local deduplication, not server idempotency. Requests have a 30-second host deadline and bounded responses. Missing/mismatched acknowledgments or failed receipt writes become unknown outcomes, stop automatic continuation, and block further sends and supervisor startup. `DurableOutbox.reconcile()` is an operator API requiring evidence; it is not a model tool. Other outbound adapters must supply their own remote idempotency keys where their services actually support them.
 
 ## Validation
 

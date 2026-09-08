@@ -26,6 +26,7 @@ import type {
 	AgentToolResult,
 	StreamFn,
 } from "./types.js";
+import { UnknownOperationError } from "./unknown-operation.js";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -911,11 +912,23 @@ async function executePreparedToolCall(
 		acceptingUpdates = false;
 		let cleanup: ToolCancellationJoin | undefined;
 		try {
-			await receipt?.settle(signal?.aborted ? "unknown" : "failed");
+			await receipt?.settle(signal?.aborted || error instanceof UnknownOperationError ? "unknown" : "failed");
 		} finally {
 			if (signal?.aborted && operation) cleanup = await joinCancelledTool(operation, cancellationGraceMs);
 		}
 		await raceWithAbort(updateEvents.settle(), signal).catch(() => undefined);
+		if (error instanceof UnknownOperationError) {
+			return {
+				result: {
+					content: [
+						{ type: "text", text: `${error.message} Do not repeat this operation before reconciliation.` },
+					],
+					details: { status: "error", kind: error.kind, outcome: error.outcome, retrySafe: false },
+					terminate: true,
+				},
+				isError: true,
+			};
+		}
 		if (signal?.aborted && cleanup) {
 			const suffix =
 				cleanup.status === "unconfirmed"

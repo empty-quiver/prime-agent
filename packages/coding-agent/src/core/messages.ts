@@ -93,6 +93,11 @@ export interface RlmChildFailureDetails {
 	childId: string;
 	sessionName: string;
 	error: string;
+	failure?: {
+		kind: "timeout" | "cancelled" | "provider_failure" | "worker_crash" | "startup_failure";
+		outcome: "failed" | "unknown";
+		retrySafe: false;
+	};
 }
 
 export type RlmChildTerminalNoticeDetails =
@@ -116,7 +121,7 @@ export function createRlmChildFailureMessage(
 	return {
 		role: "custom",
 		customType: RLM_CHILD_FAILURE_CUSTOM_TYPE,
-		content: `RLM child ${details.sessionName} (${details.childId}) failed: ${details.error}`,
+		content: `RLM child ${details.sessionName} (${details.childId}) failed: ${details.error}${details.failure ? `\nOutcome: ${JSON.stringify(details.failure)}. Do not automatically repeat the child task.` : ""}`,
 		display: true,
 		details,
 		timestamp,

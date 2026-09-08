@@ -5,10 +5,12 @@ StartLimitBurst=10
 
 [Service]
 Type=exec
+Slice=prime-agent.slice
 NotifyAccess=all
 WorkingDirectory=/opt/prime-agent
 Environment=PRIME_AGENT_KERNEL_SYSTEMD=1
 Environment=PRIME_AGENT_SUPERVISOR_UNIT=prime-agent-supervised.service
+Environment=PRIME_AGENT_RESOURCE_SLICE=prime-agent.slice
 Environment=PRIME_AGENT_KERNEL_PYTHON=/opt/prime-agent-python/bin/python
 Environment=PI_SKIP_VERSION_CHECK=1
 Environment=PRIME_AGENT_INSTALL_UV=0

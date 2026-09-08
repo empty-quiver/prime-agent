@@ -1,0 +1,1 @@
+- Added explicit unknown-operation errors that preserved uncertain receipts and stopped automatic tool continuation.
