@@ -1,0 +1,1 @@
+- Kept session ownership quarantined after synchronous disposal until kernel and child cleanup completed, and exposed cleanup failures to asynchronous callers.

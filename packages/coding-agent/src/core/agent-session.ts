@@ -1345,6 +1345,7 @@ export class AgentSession {
 	// re-populate the retained map after it's been cleared.
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
+	private _ownershipCleanupPromise?: Promise<void>;
 	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
 	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
 	private _ipythonKernelSnapshotDir?: string;
@@ -4199,6 +4200,7 @@ export class AgentSession {
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
 		if (this._disposed) {
+			await this._ownershipCleanupPromise;
 			return this._disposeCallbacksPromise;
 		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
@@ -4212,6 +4214,7 @@ export class AgentSession {
 			// agent_end completes instead of being aborted by dispose().
 			await this._drainPendingRefinementForDisposal();
 			if (this._disposed) {
+				await this._ownershipCleanupPromise;
 				return this._disposeCallbacksPromise;
 			}
 			this._disposing = true;
@@ -4386,6 +4389,7 @@ export class AgentSession {
 		this._deletedRlmChildIds.clear();
 		await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
 		this.dispose();
+		await this._ownershipCleanupPromise;
 		await this._disposeCallbacksPromise;
 	}
 
@@ -4414,7 +4418,13 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
-		this._durableWait.dispose();
+		this._durableWait.quiesce();
+		const children = new Set([
+			...[...this._activeRlmChildRuns.values()].flatMap((run) => (run.session ? [run.session] : [])),
+			...[...this._rlmChildSessions.values()].map(({ session }) => session),
+		]);
+		const needsCleanup = this.isStreaming || !!this._ipythonKernelProvisioner || children.size > 0;
+		this.agent.abort();
 		this._operationJournal.dispose();
 		this._ownedExecutionBudget?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
@@ -4463,6 +4473,19 @@ export class AgentSession {
 			cleanupSessionResources(this.sessionId);
 		} finally {
 			void this._startDisposeCallbacks();
+			if (needsCleanup) {
+				this._ownershipCleanupPromise = Promise.all([
+					this.agent.waitForIdle(),
+					this._ipythonKernelProvisioner?.dispose({ snapshot: false }),
+					...[...children].map((child) => child.disposeAsync({ kernelSnapshot: false })),
+				]).then(() => {
+					this._durableWait.dispose();
+				});
+				// A failed cleanup deliberately retains the lease. disposeAsync exposes the failure.
+				void this._ownershipCleanupPromise.catch(() => undefined);
+			} else {
+				this._durableWait.dispose();
+			}
 		}
 	}
 

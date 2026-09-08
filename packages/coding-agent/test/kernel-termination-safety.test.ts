@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DurableWait } from "../src/core/durable-wait.js";
 import type { ExtensionContext } from "../src/core/extensions/types.js";
 import { type KernelClient, ReplKernelManager } from "../src/core/kernel/index.js";
 import { terminateOwnedChild } from "../src/core/kernel/terminate-child.js";
@@ -57,6 +58,42 @@ process.stdout.write(JSON.stringify({ event: "ready", protocol: 3 }) + "\\n");
 }
 
 describe("confirmed kernel termination", () => {
+	it.each([false, true])(
+		"synchronous disposal retains ownership until confirmed cleanup (failure=%s)",
+		async (fails) => {
+			const harness = await createHarness({ persistSession: true, tools: [] });
+			let finish!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				finish = resolve;
+			});
+			const wait = Reflect.get(harness.session, "_durableWait") as DurableWait;
+			const path = join(harness.sessionManager.getSessionArtifactDir()!, "durable-wait.json");
+			Reflect.set(harness.session, "_ipythonKernelProvisioner", {
+				dispose: async () => {
+					await gate;
+					if (fails) throw new Error("exit unconfirmed");
+				},
+			});
+			try {
+				harness.session.dispose();
+				expect(() => new DurableWait(path, () => {})).toThrow();
+				finish();
+				if (fails) {
+					await expect(harness.session.disposeAsync()).rejects.toThrow("exit unconfirmed");
+					expect(() => new DurableWait(path, () => {})).toThrow();
+				} else {
+					await harness.session.disposeAsync();
+					const replacement = new DurableWait(path, () => {});
+					replacement.dispose();
+				}
+			} finally {
+				finish();
+				await harness.session.disposeAsync().catch(() => undefined);
+				wait.dispose(); // Synthetic fixture has no process to terminate.
+				harness.cleanup();
+			}
+		},
+	);
 	it("session cancellation waits for a TERM-resistant kernel and keeps the operation unknown", async () => {
 		const { manager, child, readCells, directory } = await stuckKernel(true);
 		const provisioner = new IpythonKernelProvisioner(directory, {});

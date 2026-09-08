@@ -168,9 +168,14 @@ export class DurableWait {
 		clearTimeout(this.timer);
 	}
 
-	dispose(): void {
+	/** Stop callbacks while retaining ownership until host cleanup is confirmed. */
+	quiesce(): void {
 		this.disposed = true;
 		clearTimeout(this.timer);
+	}
+
+	dispose(): void {
+		this.quiesce();
 		this.lease?.release();
 	}
 

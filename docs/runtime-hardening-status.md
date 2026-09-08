@@ -30,7 +30,9 @@ Still to verify: complete supervisor-driven daemon recovery and interruption at 
 
 - Agent-core now joins opted-in tool cleanup independently of the aborted execution signal, even if recording the unknown receipt fails. IPython opts into a 30-second maximum. Failed or unconfirmed cleanup is explicit, and aborted post-tool hooks do not overwrite that outcome. A full faux-provider session test confirms a TERM-resistant kernel exits before cancellation completes, without replay.
 
-Remaining boundary: containment requires the supervised Linux configuration. Arbitrary host-side callbacks cannot be forcibly stopped in-process. Synchronous process-exit cleanup remains best effort outside systemd; ownership handoff during synchronous disposal still needs a quarantine gate.
+- Synchronous disposal now quiesces wake callbacks and retains the session lease until active runs, owned kernels and children finish cleanup. Failed cleanup quarantines ownership and is surfaced by `disposeAsync()`. The lease cannot be handed to a replacement merely because `dispose()` returned.
+
+Remaining boundary: containment requires the supervised Linux configuration. Arbitrary host-side callbacks cannot be forcibly stopped in-process. Synchronous process-exit cleanup remains best effort outside systemd.
 
 ### Provider waits and child failure reporting (workstream 4)
 
