@@ -1112,6 +1112,9 @@ export class AgentSession {
 	get recoveryIssues(): OperationRecord[] {
 		return this._operationJournal.issues().filter((record) => record.status === "unknown");
 	}
+	get recoveryError(): string | undefined {
+		return this._operationJournal.error;
+	}
 
 	reconcileOperation(id: string, outcome: "succeeded" | "failed", evidence: string): void {
 		const record = this.recoveryIssues.find((candidate) => candidate.id === id);
@@ -1190,6 +1193,22 @@ export class AgentSession {
 	resumeWait(): void {
 		if (this.recoveryIssues.length)
 			throw new Error("Reconcile interrupted operations before resuming a durable wait");
+		const wait = this.waitState;
+		if (
+			wait?.status === "pending" &&
+			wait.condition.kind === "child" &&
+			!this._activeRlmChildRuns.has(wait.condition.id) &&
+			!this._rlmChildSessions.has(wait.condition.id)
+		) {
+			const record = this._operationJournal.find(`child:${wait.condition.id}`);
+			this.notifyWait(
+				wait.id,
+				"child",
+				wait.condition.id,
+				wait.condition.generation,
+				record?.status === "succeeded" ? "completed" : record?.status === "failed" ? "failed" : "worker_crash",
+			);
+		}
 		this._durableWait.resume();
 	}
 
@@ -10967,6 +10986,9 @@ export class AgentSession {
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		// Admission is not completion: keep an intent for the entire detached lifetime.
+		const childReceipt = await this._operationJournal.beforeTool(`child:${childNodeId}`, "rlm.run child");
+		let childOutcome: "succeeded" | "failed" | "unknown" = "unknown";
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		if (parentAssistantForUsage && !this._rlmDurableParentUsage.has(parentAssistantForUsage)) {
@@ -11249,11 +11271,14 @@ export class AgentSession {
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
 				const terminal = child._findLastAssistantInMessages(child.agent.state.messages);
+				if (child.recoveryIssues.length)
+					throw new Error("Child has interrupted operations requiring reconciliation");
 				if (terminal?.stopReason === "error" || terminal?.stopReason === "aborted") {
 					const kind =
 						terminal.stopReason === "aborted"
 							? "cancelled"
 							: (providerStreamFailureKind(terminal) ?? "provider_failure");
+					if (kind === "provider_failure") childOutcome = "failed";
 					throw new Error(`${kind}: ${terminal.errorMessage ?? "Child did not complete successfully"}`);
 				}
 				run.status = "done";
@@ -11289,6 +11314,7 @@ export class AgentSession {
 						await child.disposeAsync().catch(() => undefined);
 					}
 				}
+				childOutcome = "succeeded";
 			} catch (error) {
 				const runError = error instanceof Error ? error : new Error(String(error));
 				run.publication.reject(runError);
@@ -11364,6 +11390,8 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				// A persistence fault is sticky in the journal, but must not skip owned cleanup.
+				await childReceipt.settle(childOutcome).catch(() => undefined);
 				flushPendingChildUsageAttribution();
 				if (run.detachedDeletion) {
 					run.deletionRunFinished = true;

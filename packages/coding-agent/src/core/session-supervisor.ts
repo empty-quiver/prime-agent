@@ -165,6 +165,7 @@ export class SessionSupervisor {
 		}
 		if (
 			this.session.recoveryIssues.length ||
+			this.session.recoveryError ||
 			this.inbox.issues.length ||
 			this.inbox.error ||
 			this.session.waitError ||
@@ -172,7 +173,10 @@ export class SessionSupervisor {
 		) {
 			state = "needs_reconciliation";
 			reason =
-				this.session.waitError ?? this.inbox.error ?? "An interrupted operation or wake has an unknown outcome";
+				this.session.recoveryError ??
+				this.session.waitError ??
+				this.inbox.error ??
+				"An interrupted operation or wake has an unknown outcome";
 		}
 		if (this.stopping) state = "stopping";
 		const memory = process.memoryUsage();

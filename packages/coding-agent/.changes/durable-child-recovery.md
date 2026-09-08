@@ -1,0 +1,3 @@
+- Added durable child-run lifetime receipts so interrupted detached work required reconciliation instead of disappearing on restart.
+- Bounded operation and inbox journal reads and retained recovery evidence when capacity was exhausted.
+- Exposed receipt persistence faults in supervisor health and restored known child wait outcomes after restart.

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomicSync } from "../utils/atomic-file.js";
+import { journalFiles, readJournalJson } from "../utils/bounded-journal.js";
 import { acquireSessionLease, SESSION_LEASES_ENABLED_ENV, type SessionLease } from "./session-lease.js";
 
 export interface InboxRecord {
@@ -27,8 +28,7 @@ export class DurableInbox {
 		mkdirSync(directory, { recursive: true, mode: 0o700 });
 		this.lease = acquireSessionLease(join(directory, "owner"), directory, { [SESSION_LEASES_ENABLED_ENV]: "true" });
 		try {
-			for (const file of readdirSync(directory)) {
-				if (!file.endsWith(".json")) continue;
+			for (const file of journalFiles(directory)) {
 				if (++this.count > 100_000)
 					throw new Error("Inbox retention limit exceeded; archive requires an explicit deduplication policy");
 				const record = this.read(file);
@@ -119,7 +119,7 @@ export class DurableInbox {
 		return `${createHash("sha256").update(id).digest("hex")}.json`;
 	}
 	private read(file: string): InboxRecord {
-		const record: InboxRecord = JSON.parse(readFileSync(join(this.directory, file), "utf8"));
+		const record = readJournalJson(join(this.directory, file), 2_097_152) as InboxRecord;
 		if (
 			!record ||
 			record.version !== 1 ||
