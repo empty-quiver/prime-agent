@@ -1,6 +1,6 @@
 # Runtime hardening status
 
-This is a development branch, not a production-readiness claim. An isolated supervisor restart test has passed on Linux/ARM64. A 24-hour copied-session canary started at 2026-09-08 20:17:46 UTC; it has not yet completed. No production supervisor deployment has been performed.
+The requested hardening is implemented on this development branch, with targeted fault tests and isolated Linux/ARM64 restart and kernel validation. The operator waived the 24-hour soak on 2026-09-08. The copied-session run was stopped after two successful cycles, and its scheduled follow-up was paused. This is not a long-duration or all-provider production-readiness claim. No production supervisor deployment has been performed.
 
 ## Implemented in this branch
 
@@ -15,7 +15,7 @@ This is a development branch, not a production-readiness claim. An isolated supe
 
 - A separately persisted account identity prevents a missing or replaced ledger from silently resetting allowance. Inconsistent saved deadlines fail closed. Coverage includes pre-publication runtime/daemon child requests, write failures, identity loss/replacement, and copied-family recovery through the SDK.
 
-The opt-in supervisor additionally anchors the budget ID outside its ledger and refuses missing state even when both the ledger and its identity marker have disappeared. Complete daemon recovery and interruption at every filesystem commit boundary remain release gates.
+The opt-in supervisor additionally anchors the budget ID outside its ledger and refuses missing state even when both the ledger and its identity marker have disappeared. The tests exercise selected recovery and filesystem fault boundaries; they do not constitute exhaustive interruption testing at every commit boundary. Legacy daemon recovery is outside this supervisor's supported deployment path.
 
 ### Kernel cancellation (workstream 3)
 
@@ -45,7 +45,7 @@ Remaining boundary: containment requires the supervised Linux configuration. Arb
 - Durable deadline/job/child waits now persist absolute deadlines, target generations and wake delivery claims. The loop stops while pending; stale/duplicate job notifications cannot wake it. The bundled `agent-wait` Python skill uses the existing host bridge.
 - One process-identity lease owns the wait file. Missing/corrupt lease metadata fails closed. A recovered delivery claim is paused, not replayed. Hosts must explicitly call `resumeWait()` after startup/recovery reconciliation; constructor recovery never starts model work before host initialization.
 - SDK operators inspect `waitState`/`waitError`, call `notifyWait()` for an external job report, or explicitly `cancelWait()` after reconciliation. Child/job deadlines report timeout when a completion report is missing. External jobs are not implicitly polled.
-- The opt-in supervisor activates pending waits only after checking recovery state and binding extensions. Recovered in-flight wake delivery remains paused. Complete daemon child-worker recovery remains a release gate. No daemon command or event shape changed; notifications use existing custom-message and diagnostic envelopes.
+- The opt-in supervisor activates pending waits only after checking recovery state and binding extensions. Recovered in-flight wake delivery remains paused. Legacy daemon child-worker recovery is outside this supervisor's supported deployment path. No daemon command or event shape changed; notifications use existing custom-message and diagnostic envelopes.
 
 ### OAuth refresh isolation (workstream 5)
 
@@ -63,7 +63,7 @@ Mixed-version warning: an older executable does not understand the new attempt m
 - Added per-extension host timers following the reviewed ownership approach of #2095; synchronous and asynchronous callback failures are contained, including failed diagnostic listeners. Unload cancels pending callbacks; async intervals do not overlap.
 - Bounded timer registry metadata and released completed tool-update promises instead of retaining them until tool completion.
 - Reproduced and fixed a retry-sleep leak: 10,000 completed sleeps retained 10,000 abort listeners before the fix and zero afterward. Captured heap snapshots under four-way concurrent synthetic long transcripts; see [measurements and limitations](extension-timer-hardening.md).
-- These findings do not establish the historical OOM's root cause. Long-duration memory and controlled worker containment remain release gates.
+- These findings do not establish the historical OOM's root cause. Linux worker containment was validated; long-duration memory validation was waived, not passed.
 
 ### Operation recovery (workstream 7)
 
@@ -82,15 +82,16 @@ Mixed-version warning: an older executable does not understand the new attempt m
 - Worker and kernel scopes share a verified dedicated slice for aggregate memory/task limits. Individual kernels also have finite memory/task caps and group OOM termination. Linux/ARM64 passed 68 tests across ten files after correcting an unsupported systemd property during fault testing; coverage includes the kernel cgroup limits, pinned runtime, SIGKILL recovery, protocol repair, child outcomes and outbound uncertainty.
 - Linux/ARM64 validation passed 33 tests across seven files, including SIGKILL of the actual supervisor entrypoint followed by same-session restart with unchanged budget identity and usage. The live Spark service and Signal bridge were not changed.
 - Added exact, hash-checked Linux/ARM64 Python 3.12 dependency pins and non-editable runtime/skill installation. Sealed fingerprints are checked at supervisor and kernel startup without running site startup hooks during inspection. Changed environments fail closed instead of reinstalling dependencies. Four additional Linux tests passed, including real pinned Python kernel execution and supervisor restart with fingerprint verification. See [deployment and recovery instructions](../packages/coding-agent/deploy/README.md).
-- A network-isolated 24-hour canary now uses a byte-verified copy of the real saved transcript with faux providers, real pinned Python, four concurrent child kernels, synthetic Signal-shaped deduplication, durable waits, periodic same-session reopen and post-GC metrics/heap snapshots. A two-cycle rehearsal passed first. Historic cells, credentials and kernel snapshots were not replayed or imported. The canary enforces duration, cycle coverage, bounded gaps and explicit memory gates; elapsed time alone is insufficient. Its data and heap profiles remain private.
+- Added a network-isolated canary runner using a byte-verified copy of a real saved transcript with faux providers, real pinned Python, four concurrent child kernels, synthetic Signal-shaped deduplication, durable waits, periodic same-session reopen and post-GC metrics/heap snapshots. A two-cycle rehearsal passed first. Historic cells, credentials and kernel snapshots were not replayed or imported. The runner retains its configurable duration, cycle-coverage, gap and memory gates for optional future use. Its data and heap profiles remain private.
 
-## Remaining work
+## Final acceptance and boundaries
 
-1. **Budget integration release gates (workstream 2):** complete the remaining recovery, pre-publication, and ledger fault checks listed above; review provider request bounds and cancellation cleanup alongside workstreams 3 and 7.
-2. **Explicit waits (workstream 4):** durable conditions, wake generations, host provider deadlines and structured child failures are implemented; complete sustained recovery validation.
-3. **Extension timers and memory release gates (workstream 6):** complete long-duration canary and Linux worker containment checks. Callback ownership and two bounded retention fixes are implemented; historical OOM attribution remains unknown.
-4. **Restart integration (workstream 7):** run the copied-session canary. The standalone supervisor, pinned Python verification, wait activation, child lifetime receipts, Signal inbox/outbox deduplication, health checks and bounded-backoff template are implemented and isolated restart-tested, but not production-deployed. Legacy daemon worker recovery is not a supported deployment path for this supervisor.
-5. **Release gate:** run isolated Linux/ARM64 fault tests, review all cross-worker boundaries, then a 24–48-hour copied-session canary with isolated credentials and external effects. No production deployment until these gates pass.
+- **Final verification:** 75 targeted tests passed across 15 suites, covering budgets, recovery, waits, provider deadlines, OAuth, extension timers, journals, Signal intake and supervisor behavior. The root formatting, type, installer and browser-bundle checks passed with no fixes. Earlier isolated Linux validation additionally covered actual kernel containment and the supervisor process restart path; these are separate from the local test count.
+- **Short copied-session run:** started 2026-09-08 20:17:46 UTC and stopped by the operator's request at 20:26:26 UTC. Two cycles completed, totaling 29 synthetic model requests and 10 tool calls. Post-GC heap was approximately 67.3 and 68.1 MiB; this short sample cannot establish long-term memory stability. The periodic reopen threshold was not reached in this run; separate SIGKILL/restart tests cover same-session and budget identity restoration.
+- **Shutdown:** the service stopped with no restarts and no active kernel scopes remaining. Its exit status 143 and private `Aborted` failure record resulted from the requested stop, not a spontaneous canary failure. Evidence was preserved. The 24-hour gate is **waived, not passed**, and no automatic follow-up remains active.
+- **Supported scope:** the opt-in Linux/ARM64 standalone supervisor with verified systemd containment, pinned Python, durable state and explicit recovery. The implementation and fault checks cover the requested workstreams; they are not certification of every crash boundary, extension, provider or legacy daemon deployment.
+- **Operational limits:** unknown remote effects require operator reconciliation; Signal cannot guarantee server-side exactly-once sending or replay messages lost before local admission. Arbitrary in-process callbacks cannot be forcibly stopped individually. Historical OOM attribution and long-duration behavior remain unproven.
+- **Deployment remains separate:** no live service, Signal bridge, credentials or production state was changed. Review site-specific configuration and migration before enabling this branch; do not run two owners of the same session or share rotating OAuth credentials with older writers.
 
 ## Verification entry points
 

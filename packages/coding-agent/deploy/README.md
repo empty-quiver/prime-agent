@@ -1,6 +1,6 @@
 # Supervised Linux/ARM64 deployment
 
-This is an opt-in, source-checkout deployment. Do not replace a live installation before the isolated canary and recovery gates pass. The template requires systemd 254 or newer for bounded restart steps. Use a dedicated state family and credentials; do not share OAuth refresh files with older executables.
+This is an opt-in, source-checkout deployment. Isolated fault and short-run checks have passed; the operator waived the long-duration soak. Deployment still requires a separate configuration and migration decision, not an automatic replacement of a live installation. The template requires systemd 254 or newer for bounded restart steps. Use a dedicated state family and credentials; do not share OAuth refresh files with older executables.
 
 ## Python environment
 
@@ -64,4 +64,6 @@ Optional `signalOutbound` configuration separately specifies `url`, sending `acc
 
 The targeted tests include copied-family recovery, duplicate owner refusal, budget identity loss, uncertain inbox dispatch, Signal framing/bounds, pinned runtime drift, real Python execution and SIGKILL/restart of the actual supervisor entrypoint. Linux process tests run only in explicitly isolated user services. No test uses live Signal messages or paid model requests.
 
-The required 24–48-hour copied-session canary started on 2026-09-08 at 20:17:46 UTC and has not yet completed. Its runner is `test/suite/copied-session-canary-worker.ts`; its two-cycle Linux regression uses the official faux-provider test harness and real pinned kernels. The long run uses a private copied transcript, no live credentials, a private network namespace, fixed safe cells, four-way child work, durable waits, periodic reopen and retained heap profiles. Do not put real transcripts, manifests containing private paths or heap snapshots into the repository. This template is not a production-readiness signoff.
+The operator waived the 24-hour copied-session soak on 2026-09-08. The isolated run completed two cycles before the requested stop; owned kernels exited and monitoring was paused. This is short-run evidence, not a long-duration pass. See [acceptance results and remaining boundaries](../../../docs/runtime-hardening-status.md).
+
+The optional runner remains available at `test/suite/copied-session-canary-worker.ts`; its two-cycle Linux regression uses the official faux-provider test harness and real pinned kernels. It supports a private copied transcript, no live credentials, a private network namespace, fixed safe cells, four-way child work, durable waits, periodic reopen and retained heap profiles. Do not put real transcripts, manifests containing private paths or heap snapshots into the repository. This template is not an all-provider production-readiness signoff.
