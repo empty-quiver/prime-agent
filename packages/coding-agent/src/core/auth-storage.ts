@@ -6,7 +6,7 @@
  * try to refresh tokens simultaneously.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
@@ -14,7 +14,7 @@ import {
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import { getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -48,6 +48,8 @@ export type ApiKeyCredential = {
 
 export type OAuthCredential = {
 	type: "oauth";
+	/** An unfinished rotating-token refresh must be reconciled, not repeated after restart. */
+	_primeRefresh?: { generation: string; startedAt: number };
 } & OAuthCredentials;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
@@ -71,6 +73,7 @@ export type AuthStatus = {
 export type AuthStorageOptions = {
 	primeCliConfigPath?: string;
 	usePrimeCliConfig?: boolean;
+	oauthRefreshTimeoutMs?: number;
 };
 
 type LockResult<T> = {
@@ -104,10 +107,62 @@ type AuthApiKeyResult = {
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
+	withRefreshLock?<T>(provider: string, fn: (assertOwned: () => void) => Promise<T>): Promise<T>;
+}
+
+const refreshQueues = new WeakMap<AuthStorageBackend, Map<string, Promise<unknown>>>();
+
+async function withRefreshLock<T>(
+	storage: AuthStorageBackend,
+	provider: string,
+	fn: (assertOwned: () => void) => Promise<T>,
+): Promise<T> {
+	if (storage.withRefreshLock) return storage.withRefreshLock(provider, fn);
+	let queues = refreshQueues.get(storage);
+	if (!queues) {
+		queues = new Map();
+		refreshQueues.set(storage, queues);
+	}
+	const previous = queues.get(provider) ?? Promise.resolve();
+	const operation = previous.catch(() => undefined).then(() => fn(() => {}));
+	queues.set(provider, operation);
+	try {
+		return await operation;
+	} finally {
+		if (queues.get(provider) === operation) queues.delete(provider);
+	}
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
 	constructor(private authPath: string = join(getAgentDir(), "auth.json")) {}
+
+	async withRefreshLock<T>(provider: string, fn: (assertOwned: () => void) => Promise<T>): Promise<T> {
+		this.ensureParentDir();
+		this.ensureFileExists();
+		// The current credential schema has one account slot per provider and auth file.
+		const path = realpathIfPresentSync(this.authPath);
+		const key = createHash("sha256").update(provider).digest("hex");
+		let compromised: Error | undefined;
+		const assertOwned = () => {
+			if (compromised) throw compromised;
+		};
+		// proper-lockfile keys its in-process ownership table by target, not lockfilePath.
+		const release = await lockfile.lock(`${path}.refresh-${key}`, {
+			realpath: false,
+			stale: 120_000,
+			retries: { retries: 60, minTimeout: 20, maxTimeout: 500, factor: 1.5 },
+			onCompromised: (error) => {
+				compromised = error;
+			},
+		});
+		try {
+			assertOwned();
+			return await fn(assertOwned);
+		} finally {
+			if (compromised) await release().catch(() => undefined);
+			else await release();
+		}
+	}
 
 	private ensureParentDir(): void {
 		const dir = dirname(this.authPath);
@@ -186,11 +241,15 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 		let release: (() => void) | undefined;
 		try {
-			release = this.acquireLockSyncWithRetry(this.authPath);
+			release = this.acquireLockSyncWithRetry(realpathIfPresentSync(this.authPath));
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, {
+					mode: 0o600,
+					fsync: true,
+					fsyncDir: true,
+				});
 			}
 			return result;
 		} finally {
@@ -234,7 +293,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, {
+					mode: 0o600,
+					fsync: true,
+					fsyncDir: true,
+				});
 			}
 			throwIfCompromised();
 			return result;
@@ -703,6 +766,10 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
+		if (credential.type === "oauth") {
+			const { _primeRefresh: _attempt, ...freshCredential } = credential;
+			credential = freshCredential;
+		}
 		this.clearStaleAuthSource(provider, "stored");
 		this.data[provider] = credential;
 		this.persistProviderChange(provider, credential);
@@ -819,42 +886,77 @@ export class AuthStorage {
 			return null;
 		}
 
-		const result = await this.storage.withLockAsync(async (current) => {
-			const currentData = this.parseStorageData(current);
-			this.data = currentData;
-			this.loadError = null;
-
-			const cred = currentData[providerId];
-			if (cred?.type !== "oauth") {
-				return { result: null };
-			}
-
-			if (Date.now() < cred.expires) {
-				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
-			}
-
-			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
-				if (value.type === "oauth") {
-					oauthCreds[key] = value;
+		return withRefreshLock(this.storage, providerId, async (assertOwned) => {
+			const prepared = await this.storage.withLockAsync(async (current) => {
+				assertOwned();
+				const data = this.parseStorageData(current);
+				this.data = data;
+				this.loadError = null;
+				const cred = data[providerId];
+				if (cred?.type !== "oauth") return { result: null };
+				if (Date.now() < cred.expires) return { result: cred };
+				if (cred._primeRefresh) {
+					throw new Error(`OAuth refresh outcome unknown for ${providerId}; sign in again before retrying`);
 				}
-			}
+				const prepared: OAuthCredential = {
+					...cred,
+					_primeRefresh: { generation: randomUUID(), startedAt: Date.now() },
+				};
+				return { result: prepared, next: JSON.stringify({ ...data, [providerId]: prepared }, null, 2) };
+			});
+			if (!prepared) return null;
+			if (!prepared._primeRefresh) return { apiKey: provider.getApiKey(prepared), newCredentials: prepared };
 
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
+			const expected = JSON.stringify(prepared);
+			const { _primeRefresh: _attempt, ...credentials } = prepared;
+			const controller = new AbortController();
+			const configuredTimeout = this.options.oauthRefreshTimeoutMs;
+			const timeoutMs =
+				configuredTimeout !== undefined && Number.isFinite(configuredTimeout) && configuredTimeout > 0
+					? Math.min(configuredTimeout, 30_000)
+					: 30_000;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const deadline = new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(() => {
+						const error = new Error(`OAuth refresh timed out for ${providerId}; outcome unknown, sign in again`);
+						controller.abort(error);
+						reject(error);
+					}, timeoutMs);
+				});
+				// Race also bounds custom providers that ignore the signal. A late result cannot commit.
+				const refreshed = await Promise.race([
+					provider.refreshToken(credentials, { signal: controller.signal }),
+					deadline,
+				]);
+				controller.signal.throwIfAborted();
+				const { _primeRefresh: _untrustedAttempt, ...cleanCredentials } = refreshed;
+				return await this.storage.withLockAsync(async (current) => {
+					assertOwned();
+					controller.signal.throwIfAborted();
+					const data = this.parseStorageData(current);
+					this.data = data;
+					const currentCred = data[providerId];
+					if (JSON.stringify(currentCred) !== expected) {
+						// A login, logout, or account switch won. Never overwrite or return the old account's key.
+						return {
+							result:
+								currentCred?.type === "oauth" && Date.now() < currentCred.expires
+									? { apiKey: provider.getApiKey(currentCred), newCredentials: currentCred }
+									: null,
+						};
+					}
+					const merged = { ...data, [providerId]: { ...cleanCredentials, type: "oauth" as const } };
+					this.data = merged;
+					return {
+						result: { apiKey: provider.getApiKey(cleanCredentials), newCredentials: cleanCredentials },
+						next: JSON.stringify(merged, null, 2),
+					};
+				});
+			} finally {
+				if (timer) clearTimeout(timer);
 			}
-
-			const merged: AuthStorageData = {
-				...currentData,
-				[providerId]: { type: "oauth", ...refreshed.newCredentials },
-			};
-			this.data = merged;
-			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
 		});
-
-		return result;
 	}
 
 	/**

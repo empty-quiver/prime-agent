@@ -54,7 +54,7 @@ export interface OAuthProviderInterface {
 	usesCallbackServer?: boolean;
 
 	/** Refresh expired credentials, return updated credentials to persist */
-	refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+	refreshToken(credentials: OAuthCredentials, options?: { signal?: AbortSignal }): Promise<OAuthCredentials>;
 
 	/** Convert credentials to API key string for the provider */
 	getApiKey(credentials: OAuthCredentials): string;

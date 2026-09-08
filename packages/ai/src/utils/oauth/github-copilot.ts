@@ -224,11 +224,13 @@ async function pollForGitHubAccessToken(
 export async function refreshGitHubCopilotToken(
 	refreshToken: string,
 	enterpriseDomain?: string,
+	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
 	const domain = enterpriseDomain || "github.com";
 	const urls = getUrls(domain);
 
 	const raw = await fetchJson(urls.copilotTokenUrl, {
+		signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 		headers: {
 			Accept: "application/json",
 			Authorization: `Bearer ${refreshToken}`,
@@ -360,9 +362,9 @@ export const githubCopilotOAuthProvider: OAuthProviderInterface = {
 		});
 	},
 
-	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+	async refreshToken(credentials: OAuthCredentials, options): Promise<OAuthCredentials> {
 		const creds = credentials as CopilotCredentials;
-		return refreshGitHubCopilotToken(creds.refresh, creds.enterpriseUrl);
+		return refreshGitHubCopilotToken(creds.refresh, creds.enterpriseUrl, options?.signal);
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

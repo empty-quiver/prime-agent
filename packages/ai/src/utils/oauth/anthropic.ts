@@ -166,7 +166,7 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 	});
 }
 
-async function postJson(url: string, body: Record<string, string | number>): Promise<string> {
+async function postJson(url: string, body: Record<string, string | number>, signal?: AbortSignal): Promise<string> {
 	const response = await fetch(url, {
 		method: "POST",
 		headers: {
@@ -174,7 +174,7 @@ async function postJson(url: string, body: Record<string, string | number>): Pro
 			Accept: "application/json",
 		},
 		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(30_000),
+		signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 	});
 
 	const responseBody = await response.text();
@@ -345,14 +345,18 @@ export async function loginAnthropic(options: {
 /**
  * Refresh Anthropic OAuth token
  */
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshAnthropicToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
 	let responseBody: string;
 	try {
-		responseBody = await postJson(TOKEN_URL, {
-			grant_type: "refresh_token",
-			client_id: CLIENT_ID,
-			refresh_token: refreshToken,
-		});
+		responseBody = await postJson(
+			TOKEN_URL,
+			{
+				grant_type: "refresh_token",
+				client_id: CLIENT_ID,
+				refresh_token: refreshToken,
+			},
+			signal,
+		);
 	} catch (error) {
 		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
 	}
@@ -392,8 +396,8 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 		});
 	},
 
-	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-		return refreshAnthropicToken(credentials.refresh);
+	async refreshToken(credentials: OAuthCredentials, options): Promise<OAuthCredentials> {
+		return refreshAnthropicToken(credentials.refresh, options?.signal);
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

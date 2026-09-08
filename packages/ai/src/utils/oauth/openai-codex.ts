@@ -136,9 +136,10 @@ async function exchangeAuthorizationCode(
 	};
 }
 
-async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
+async function refreshAccessToken(refreshToken: string, signal?: AbortSignal): Promise<TokenResult> {
 	try {
 		const response = await fetch(TOKEN_URL, {
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 			method: "POST",
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
 			body: new URLSearchParams({
@@ -415,8 +416,8 @@ export async function loginOpenAICodex(options: {
 /**
  * Refresh OpenAI Codex OAuth token
  */
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
-	const result = await refreshAccessToken(refreshToken);
+export async function refreshOpenAICodexToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+	const result = await refreshAccessToken(refreshToken, signal);
 	if (result.type !== "success") {
 		throw new Error(result.message);
 	}
@@ -448,8 +449,8 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 		});
 	},
 
-	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-		return refreshOpenAICodexToken(credentials.refresh);
+	async refreshToken(credentials: OAuthCredentials, options): Promise<OAuthCredentials> {
+		return refreshOpenAICodexToken(credentials.refresh, options?.signal);
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

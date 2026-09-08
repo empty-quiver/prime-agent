@@ -1,0 +1,2 @@
+- Fixed slow OAuth refreshes blocking unrelated credentials by separating provider refresh locks from short atomic credential-file updates.
+- Added bounded OAuth refreshes and durable uncertain-outcome protection; interrupted refreshes require a new login instead of replaying a possibly rotated token.

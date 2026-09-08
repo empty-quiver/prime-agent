@@ -1,0 +1,1 @@
+- Added cancellation and a 30-second network deadline to built-in OAuth token refreshes.
