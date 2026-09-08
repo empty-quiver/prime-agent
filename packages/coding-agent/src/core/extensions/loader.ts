@@ -38,7 +38,7 @@ function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
 	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const packageIndex = path.resolve(__dirname, "../..", "index.js");
+	const packageIndex = path.resolve(__dirname, "../..", import.meta.url.endsWith(".ts") ? "index.ts" : "index.js");
 
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
@@ -50,6 +50,10 @@ function getAliases(): Record<string, string> {
 		if (fs.existsSync(workspacePath)) {
 			return workspacePath;
 		}
+		const sourcePath = workspacePath
+			.replace(`${path.sep}dist${path.sep}`, `${path.sep}src${path.sep}`)
+			.replace(/\.js$/, ".ts");
+		if (import.meta.url.endsWith(".ts") && fs.existsSync(sourcePath)) return sourcePath;
 		return fileURLToPath(import.meta.resolve(specifier));
 	};
 

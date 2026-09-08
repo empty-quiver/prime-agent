@@ -36,11 +36,18 @@ Remaining boundary: arbitrary detached subprocess trees and already-running host
 
 Mixed-version warning: an older executable does not understand the new attempt marker. Do not share this credential file with older refresh writers during a canary. External tools and separately copied credential files are outside this lock domain.
 
+### Extension lifetimes and measured retention (workstream 6)
+
+- Added per-extension host timers following the reviewed ownership approach of #2095; synchronous and asynchronous callback failures are contained, including failed diagnostic listeners. Unload cancels pending callbacks; async intervals do not overlap.
+- Bounded timer registry metadata and released completed tool-update promises instead of retaining them until tool completion.
+- Reproduced and fixed a retry-sleep leak: 10,000 completed sleeps retained 10,000 abort listeners before the fix and zero afterward. Captured heap snapshots under four-way concurrent synthetic long transcripts; see [measurements and limitations](extension-timer-hardening.md).
+- These findings do not establish the historical OOM's root cause. Long-duration memory and controlled worker containment remain release gates.
+
 ## Remaining work
 
 1. **Budget integration release gates (workstream 2):** complete the remaining recovery, pre-publication, and ledger fault checks listed above; review provider request bounds and cancellation cleanup alongside workstreams 3 and 7.
 2. **Explicit waits (workstream 4):** persist typed deadline/job/child conditions and wake generations; end the parent turn without injecting immediate continuations; expose provider deadlines and classify cancellation, timeout, provider failure and worker crash. Retry only when outcome classification permits it.
-3. **Extension timers and memory (workstream 6):** review/adopt upstream #2095 at pinned head `58a3b159b0373bae83553c6884cea581d34f1ea1`, test synchronous/async callback failures and unload ownership, then collect heap profiles with representative transcript length and concurrency. No retained-memory root cause has been established.
+3. **Extension timers and memory release gates (workstream 6):** complete long-duration canary and Linux worker containment checks. Callback ownership and two bounded retention fixes are implemented; historical OOM attribution remains unknown.
 4. **Restart recovery (workstream 7):** durable session identity and one active lease owner; journal operation intent/outcome; reconcile unknown external effects; deduplicate Signal message IDs; use supported idempotency keys; progress-aware health checks; bounded restart backoff; pinned Python dependencies.
 5. **Release gate:** run isolated Linux/ARM64 fault tests, review all cross-worker boundaries, then a 24–48-hour copied-session canary with isolated credentials and external effects. No production deployment until these gates pass.
 

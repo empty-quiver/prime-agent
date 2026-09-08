@@ -1,9 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
 import triggerCompactExtension from "../examples/extensions/trigger-compact.js";
+import { ExtensionTimerHost } from "../src/core/extensions/host-timers.js";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/core/extensions/index.js";
 
 function createContext(tokens: number | null, compact = vi.fn()): ExtensionContext {
 	return {
+		...new ExtensionTimerHost(() => {}).forOwner("trigger-compact-fixture"),
 		hasUI: false,
 		ui: {} as ExtensionContext["ui"],
 		cwd: process.cwd(),

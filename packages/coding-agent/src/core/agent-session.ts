@@ -5232,7 +5232,7 @@ export class AgentSession {
 
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return undefined;
-		const context = this._extensionRunner.createCommandContext();
+		const context = this._extensionRunner.createCommandContext(command.sourceInfo.path);
 		return Promise.resolve()
 			.then(() => command.handler(args, context))
 
@@ -9407,6 +9407,7 @@ export class AgentSession {
 			extensionsResult.runtime.getExecEnv = this._execEnvProvider;
 		}
 
+		const previousRunner = this._extensionRunner;
 		this._extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -9414,6 +9415,11 @@ export class AgentSession {
 			this.sessionManager,
 			this._modelRegistry,
 		);
+		if (previousRunner?.hasSameExtensions(extensionsResult.extensions)) {
+			this._extensionRunner.adoptHostTimers(previousRunner);
+		} else {
+			previousRunner?.retire();
+		}
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}

@@ -13,6 +13,7 @@ import {
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import type { ModelExecutionReservation } from "./execution-governor.js";
+import { PendingEvents } from "./pending-events.js";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -846,7 +847,7 @@ async function executePreparedToolCall(
 	emit: AgentEventSink,
 	config: AgentLoopConfig,
 ): Promise<ExecutedToolCallOutcome> {
-	const updateEvents: Promise<void>[] = [];
+	const updateEvents = new PendingEvents();
 	let acceptingUpdates = true;
 
 	try {
@@ -858,26 +859,21 @@ async function executePreparedToolCall(
 				if (!acceptingUpdates || signal?.aborted) {
 					return;
 				}
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
+				updateEvents.add(
+					emit({
+						type: "tool_execution_update",
+						toolCallId: prepared.toolCall.id,
+						toolName: prepared.toolCall.name,
+						args: prepared.toolCall.arguments,
+						partialResult,
+					}),
 				);
 			}),
 			signal,
 		);
 		acceptingUpdates = false;
 		try {
-			await raceWithAbort(
-				Promise.all(updateEvents).then(() => undefined),
-				signal,
-			);
+			await raceWithAbort(updateEvents.settle(), signal);
 		} catch (error) {
 			if (!signal?.aborted || !isAbortError(error)) {
 				throw error;
@@ -886,10 +882,7 @@ async function executePreparedToolCall(
 		return { result, isError: false };
 	} catch (error) {
 		acceptingUpdates = false;
-		await raceWithAbort(
-			Promise.all(updateEvents).then(() => undefined),
-			signal,
-		).catch(() => undefined);
+		await raceWithAbort(updateEvents.settle(), signal).catch(() => undefined);
 		return {
 			result: createErrorToolResult(
 				signal?.aborted ? "Tool execution aborted" : error instanceof Error ? error.message : String(error),

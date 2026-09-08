@@ -1,0 +1,1 @@
+- Fixed long-running tools retaining completed update-delivery promises and delayed update errors escaping rejection handling.

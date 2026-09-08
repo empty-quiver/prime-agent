@@ -1,0 +1,2 @@
+- Added host-owned extension timers with callback error containment, unload cleanup and non-overlapping async intervals, adopting the ownership approach in [#2095](https://github.com/PrimeIntellect-ai/prime-agent/pull/2095).
+- Fixed completed retry sleeps retaining abort listeners and source-checkout extension loading requiring absent compiled package entries.

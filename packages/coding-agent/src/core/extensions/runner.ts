@@ -11,6 +11,7 @@ import type { KeybindingsConfig } from "../keybindings.js";
 import type { ModelRegistry } from "../model-registry.js";
 import type { SessionManager } from "../session-manager.js";
 import type { BuildSystemPromptOptions } from "../system-prompt.js";
+import { ExtensionTimerHost } from "./host-timers.js";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -258,6 +259,27 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	private timerHost = new ExtensionTimerHost((error) => this.emitError(error));
+
+	adoptHostTimers(previous: ExtensionRunner): void {
+		this.timerHost.dispose();
+		this.timerHost = previous.timerHost;
+		this.timerHost.setReporter((error) => this.emitError(error));
+	}
+
+	hasSameExtensions(extensions: Extension[]): boolean {
+		return this.extensions === extensions;
+	}
+
+	retire(): void {
+		this.staleMessage = "This extension ctx is stale after reload or session replacement";
+		this.timerHost.dispose();
+	}
+
+	createTimerContext(owner: string) {
+		this.assertActive();
+		return this.timerHost.forOwner(owner);
+	}
 
 	constructor(
 		extensions: Extension[],
@@ -473,11 +495,13 @@ export class ExtensionRunner {
 	): void {
 		if (!this.staleMessage) {
 			this.staleMessage = message;
+			this.timerHost.dispose();
 			this.runtime.invalidate(message);
 		}
 	}
 
 	private assertActive(): void {
+		this.timerHost.assertActive();
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);
 		}
@@ -489,8 +513,19 @@ export class ExtensionRunner {
 	}
 
 	emitError(error: ExtensionError): void {
+		const reportListenerError = (listenerError: unknown) => {
+			try {
+				console.error("Extension error listener failed", listenerError);
+			} catch {
+				/* dead stderr */
+			}
+		};
 		for (const listener of this.errorListeners) {
-			listener(error);
+			try {
+				Promise.resolve(listener(error)).catch(reportListenerError);
+			} catch (listenerError) {
+				reportListenerError(listenerError);
+			}
 		}
 	}
 
@@ -575,10 +610,11 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(): ExtensionContext {
+	createContext(owner = "<host>"): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		return {
+			...this.createTimerContext(owner),
 			get ui() {
 				runner.assertActive();
 				return runner.uiContext;
@@ -638,13 +674,13 @@ export class ExtensionRunner {
 		};
 	}
 
-	createCommandContext(): ExtensionCommandContext {
+	createCommandContext(owner = "<host>"): ExtensionCommandContext {
 		// Use property descriptors instead of object spread so the guarded getters from
 		// createContext() stay lazy. A spread would eagerly read them once and freeze the
 		// old values into the returned object, bypassing stale-instance checks.
 		const context = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this.createContext()),
+			Object.getOwnPropertyDescriptors(this.createContext(owner)),
 		) as ExtensionCommandContext;
 		context.waitForIdle = () => {
 			this.assertActive();
@@ -684,10 +720,10 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
 
 		for (const ext of this.extensions) {
+			const ctx = this.createContext(ext.path);
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
 
@@ -718,13 +754,13 @@ export class ExtensionRunner {
 	}
 
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
-		const ctx = this.createContext();
 		let currentMessage = event.message;
 		let modified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("message_end");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -760,13 +796,13 @@ export class ExtensionRunner {
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -810,12 +846,12 @@ export class ExtensionRunner {
 	}
 
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
 		let result: ToolCallEventResult | undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				const handlerResult = await handler(event, ctx);
@@ -833,11 +869,10 @@ export class ExtensionRunner {
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
-		const ctx = this.createContext();
-
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("user_bash");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -862,12 +897,12 @@ export class ExtensionRunner {
 	}
 
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
-		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -894,12 +929,12 @@ export class ExtensionRunner {
 	}
 
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
-		const ctx = this.createContext();
 		let currentPayload = payload;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -934,20 +969,17 @@ export class ExtensionRunner {
 		systemPromptOptions: BuildSystemPromptOptions,
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		let currentSystemPrompt = systemPrompt;
-		const ctx = Object.defineProperties(
-			{},
-			Object.getOwnPropertyDescriptors(this.createContext()),
-		) as ExtensionContext;
-		ctx.getSystemPrompt = () => {
-			this.assertActive();
-			return currentSystemPrompt;
-		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
+			ctx.getSystemPrompt = () => {
+				this.assertActive();
+				return currentSystemPrompt;
+			};
 
 			for (const handler of handlers) {
 				try {
@@ -1001,7 +1033,6 @@ export class ExtensionRunner {
 		promptPaths: Array<{ path: string; extensionPath: string }>;
 		themePaths: Array<{ path: string; extensionPath: string }>;
 	}> {
-		const ctx = this.createContext();
 		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
 		const themePaths: Array<{ path: string; extensionPath: string }> = [];
@@ -1009,6 +1040,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("resources_discover");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -1043,12 +1075,12 @@ export class ExtensionRunner {
 
 	/** Emit input event. Transforms chain, "handled" short-circuits. */
 	async emitInput(text: string, images: ImageContent[] | undefined, source: InputSource): Promise<InputEventResult> {
-		const ctx = this.createContext();
 		let currentText = text;
 		let currentImages = images;
 
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
+				const ctx = this.createContext(ext.path);
 				try {
 					const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
 					const result = (await handler(event, ctx)) as InputEventResult | undefined;

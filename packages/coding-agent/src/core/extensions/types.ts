@@ -69,6 +69,7 @@ import type {
 	IpythonToolDetails,
 	IpythonToolInput,
 } from "../tools/index.js";
+import type { ExtensionTimers } from "./host-timers.js";
 
 export type { ExecOptions, ExecResult } from "../exec.js";
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.js";
@@ -279,7 +280,7 @@ export interface CompactOptions {
 /**
  * Context passed to extension event handlers.
  */
-export interface ExtensionContext {
+export interface ExtensionContext extends ExtensionTimers {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Whether UI is available (false in print/RPC mode) */
