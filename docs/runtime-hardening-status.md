@@ -22,8 +22,11 @@ Still to verify: complete daemon recovery and pre-publication extension paths, c
 - The interrupted cell is not replayed. Its returned error distinguishes unknown external effects from successful completion.
 - Journal-based orphan cleanup now refuses identity-free records on every platform. Existing verified bash-child reaping remains in place.
 - Interactive interruption retains its wait/preserve-state choice. Restarting after a busy-before-execution rejection submits the *new* cell, not the interrupted cell.
+- Opt-in Linux systemd scopes inherit the kernel environment without putting credentials on the command line. Scope invocation IDs and cgroup membership identify ownership; cleanup confirms the cgroup is empty, including detached descendants. The declared supervisor must contain the caller and use `KillMode=control-group`.
+- Protocol repair and failed startup now await confirmed cleanup before discarding manager state. An interrupted cell is rejected, not replayed. Scopes bind to the supervisor so its death also stops kernel descendants.
+- Linux/ARM64 integration tests passed for TERM-resistant detached descendants, early kernel exits, supervisor SIGKILL, and all 22 protocol-repair regressions. Enable with `PRIME_AGENT_KERNEL_SYSTEMD=1` and `PRIME_AGENT_SUPERVISOR_UNIT=<owning-user-service>.service`; this is not enabled on production.
 
-Remaining boundary: arbitrary detached subprocess trees and already-running host-side requests are not proven contained. Full descendant exit confirmation and worker/cgroup containment still need integration tests. Synchronous process-exit cleanup remains best effort.
+Remaining boundary: containment requires the supervised Linux configuration. Already-running host-side requests still need cancellation-join integration. Synchronous process-exit cleanup remains best effort outside systemd.
 
 ### Provider waits and child failure reporting (workstream 4)
 

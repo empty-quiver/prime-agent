@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { terminateKernelScope } from "./systemd-scope.js";
 
 function hasExited(child: ChildProcess): boolean {
 	return child.exitCode !== null || child.signalCode !== null;
@@ -39,6 +40,8 @@ export async function terminateOwnedChild(
 	child: ChildProcess,
 	options: { force?: boolean; graceMs?: number; forceWaitMs?: number } = {},
 ): Promise<void> {
+	if (child.pid === undefined && typeof child.spawnfile === "string") return;
+	await terminateKernelScope(child, options.force ?? false);
 	if (hasExited(child)) return;
 	if (!options.force && (await signalAndWait(child, "SIGTERM", options.graceMs ?? 1_000))) return;
 	if (await signalAndWait(child, "SIGKILL", options.forceWaitMs ?? 5_000)) return;

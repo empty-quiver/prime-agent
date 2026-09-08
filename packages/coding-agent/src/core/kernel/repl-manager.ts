@@ -1,7 +1,7 @@
 // Kernel client for the REPL runtime: the kernel is a JSON-lines subprocess
 // (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -48,6 +48,7 @@ import {
 	type RestoreResult,
 	type SnapshotResult,
 } from "./state-snapshot.js";
+import { spawnKernelProcess } from "./systemd-scope.js";
 import { terminateOwnedChild } from "./terminate-child.js";
 
 const REPL_PROTOCOL_VERSION = 3;
@@ -206,6 +207,8 @@ export class ReplKernelManager {
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
 	private terminationPromise?: Promise<void>;
+	private allowRepairIdle = false;
+	private protocolDiscardPromise?: Promise<void>;
 
 	constructor(options: KernelManagerOptions) {
 		this.options = {
@@ -307,24 +310,34 @@ export class ReplKernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		const child = spawn(python, ["-m", "rlm.repl"], {
-			cwd: this.options.cwd,
-			// bash.py journals its process groups under this pid so the host can
-			// reap them if the runtime dies without running its shutdown hook.
-			env: {
-				...process.env,
-				...this.options.env,
-				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
-			},
-			stdio: ["pipe", "pipe", "pipe"],
-		});
+		let launched: ReturnType<typeof spawnKernelProcess>;
+		try {
+			launched = spawnKernelProcess(python, ["-m", "rlm.repl"], {
+				cwd: this.options.cwd,
+				// bash.py journals its process groups under this pid so the host can
+				// reap them if the runtime dies without running its shutdown hook.
+				env: {
+					...process.env,
+					...this.options.env,
+					PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+				},
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+		} catch (error) {
+			liveKernels.delete(this);
+			this.state = "idle";
+			throw error;
+		}
+		const { child, ownershipReady } = launched;
 		this.child = child;
 		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);
 		this.readyDeferred = createDeferred<number>();
+		void this.readyDeferred.promise.catch(() => undefined);
 		this.startupProtocolError = undefined;
 		this.wireChild(child);
 
 		try {
+			await ownershipReady;
 			const protocol = await this.waitForReady(child);
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			// Ready and a corrupt frame can share one stdout chunk: ready resolved the
@@ -339,6 +352,10 @@ export class ReplKernelManager {
 			}
 		} catch (e) {
 			if (this.startStale(generation)) throw e; // never tear down a newer start's kernel
+			if (this.protocolRepairOwner && !this.protocolRepairOwner.superseded) {
+				await this.terminate(true, true);
+				throw e;
+			}
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			// Only the call that performed the cleanup may resurrect to idle; a
 			// concurrent kill()/teardown owns the state otherwise.
@@ -444,7 +461,9 @@ export class ReplKernelManager {
 			// ready timeout. cleanupResources clears readyDeferred, so reject first;
 			// a late error after ready resolved is a no-op on the settled promise.
 			this.readyDeferred?.reject(err);
-			this.cleanupResources();
+			void this.terminate(true, this.protocolRepairOwner !== undefined).catch((error) =>
+				this.appendKernelDiagnostic(`spawn cleanup unconfirmed: ${errorMessage(error)}`),
+			);
 		});
 
 		child.on("exit", (code, signal) => {
@@ -458,7 +477,9 @@ export class ReplKernelManager {
 			// teardown and runs cleanupResources itself. Cleaning up here would bump the
 			// generation and misread the owning shutdown as superseded.
 			if (this.gracefulShutdownGeneration === this.startGeneration) return;
-			this.cleanupResources();
+			void this.terminate(true, this.protocolRepairOwner !== undefined).catch((error) =>
+				this.appendKernelDiagnostic(`exit cleanup unconfirmed: ${errorMessage(error)}`),
+			);
 		});
 	}
 
@@ -482,8 +503,12 @@ export class ReplKernelManager {
 			// successful restore never implicates the snapshot; keeping the flag
 			// costs at most one bounded restore per later attempt.
 			const snapshotSuspect = this.pendingRestore;
-			this.killChildToIdle();
-			if (snapshotSuspect) this.pendingRestore = false;
+			void this.killChildToIdle().then(
+				() => {
+					if (snapshotSuspect) this.pendingRestore = false;
+				},
+				(error) => this.appendKernelDiagnostic(`repair cleanup unconfirmed: ${errorMessage(error)}`),
+			);
 			return;
 		}
 		const owner = { superseded: false };
@@ -505,30 +530,31 @@ export class ReplKernelManager {
 
 	private async repairProtocolChild(child: ChildProcess, owner: { superseded: boolean }): Promise<void> {
 		if (this.child !== child || this.state === "shutdown") return;
-		this.killChildToIdle();
+		await this.killChildToIdle();
+		if (owner.superseded || this.state !== "idle") return;
 
 		const start = this.start();
 		const generation = this.startGeneration;
 		try {
 			await start;
 		} catch (error) {
-			this.finishFailedProtocolRepair(owner, error);
+			await this.finishFailedProtocolRepair(owner, error);
 			return;
 		}
 		if (this.startStale(generation) || (this.state as string) !== "running") {
-			this.finishFailedProtocolRepair(owner);
+			await this.finishFailedProtocolRepair(owner);
 			return;
 		}
 
 		const restored = await this.performRestore(true);
 		if (this.startStale(generation) || (this.state as string) !== "running") {
-			this.finishFailedProtocolRepair(owner);
+			await this.finishFailedProtocolRepair(owner);
 			return;
 		}
 		if (this.options.snapshot && restored === null) {
 			if (owner.superseded || this.protocolRepairOwner !== owner) return;
 			this.appendKernelDiagnostic("protocol repair restore failed; discarding replacement kernel");
-			this.killChildToIdle();
+			await this.killChildToIdle();
 			// The snapshot is the declared culprit; the lazy path must not retry it.
 			this.pendingRestore = false;
 			return;
@@ -539,13 +565,13 @@ export class ReplKernelManager {
 		if (!this.options.bootstrapCode) return;
 		const bootstrapped = await this.bootstrapRepairedKernel(this.options.bootstrapCode);
 		if (this.startStale(generation) || (this.state as string) !== "running") {
-			this.finishFailedProtocolRepair(owner);
+			await this.finishFailedProtocolRepair(owner);
 			return;
 		}
 		if (!bootstrapped) {
 			if (owner.superseded || this.protocolRepairOwner !== owner) return;
 			this.appendKernelDiagnostic("protocol repair bootstrap failed; discarding replacement kernel");
-			this.killChildToIdle();
+			await this.killChildToIdle();
 		}
 	}
 
@@ -635,26 +661,42 @@ export class ReplKernelManager {
 		}
 		if (!code || !this.pendingRebootstrap) return true;
 		const ok = await this.bootstrapRepairedKernel(code);
-		if (!ok && this.state === "running") this.killChildToIdle();
+		if (!ok && this.state === "running") await this.killChildToIdle();
 		return ok;
 	}
 
 	/** Kill the current child and settle at clean idle, so the next start spawns fresh. */
-	private killChildToIdle(): void {
+	private killChildToIdle(): Promise<void> {
+		if (this.protocolDiscardPromise) return this.protocolDiscardPromise;
+		const discard = this.performChildDiscard();
+		this.protocolDiscardPromise = discard;
+		void discard.then(
+			() => {
+				if (this.protocolDiscardPromise === discard) this.protocolDiscardPromise = undefined;
+			},
+			() => {
+				if (this.protocolDiscardPromise === discard) this.protocolDiscardPromise = undefined;
+			},
+		);
+		return discard;
+	}
+
+	private async performChildDiscard(): Promise<void> {
 		// The discarded kernel carried the runtime bootstrap and (possibly) the
 		// restored namespace; a lazily started replacement must reprovision both.
 		this.pendingRebootstrap = true;
 		this.pendingRestore = true;
-		this.state = "shutdown";
-		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
-		this.state = "idle";
+		if (this.teardownInFlight > 0) return;
+		this.allowRepairIdle = true;
+		await this.terminate(true, true);
+		if (this.allowRepairIdle && this.isDefunct) this.state = "idle";
 	}
 
-	private finishFailedProtocolRepair(owner: { superseded: boolean }, error?: unknown): void {
+	private async finishFailedProtocolRepair(owner: { superseded: boolean }, error?: unknown): Promise<void> {
 		if (error) this.appendKernelDiagnostic(`protocol repair start failed: ${errorMessage(error)}`);
+		if (this.terminationPromise) await this.terminationPromise;
 		if (owner.superseded || this.protocolRepairOwner !== owner) return;
-		if (this.state === "shutdown") this.state = "idle";
+		if (this.isDefunct) this.state = "idle";
 	}
 
 	private supersedeProtocolRepair(): void {
@@ -663,8 +705,8 @@ export class ReplKernelManager {
 
 	/** Wait until no protocol repair is pending; resolves early when the signal aborts. */
 	private async waitForProtocolRepair(signal?: AbortSignal): Promise<void> {
-		while (this.protocolRepairPromise && !signal?.aborted) {
-			const repair = this.protocolRepairPromise;
+		while ((this.protocolRepairPromise || this.protocolDiscardPromise) && !signal?.aborted) {
+			const repair = Promise.all([this.protocolRepairPromise, this.protocolDiscardPromise]);
 			if (!signal) {
 				await repair;
 				continue;
@@ -857,6 +899,7 @@ export class ReplKernelManager {
 		if (opts.signal?.aborted) {
 			return { stdout: "", stderr: "", status: "aborted", durationMs: 0 };
 		}
+		if (!opts.protocolRepair) await this.waitForProtocolRepair(opts.signal);
 		await this.start({ signal: opts.signal });
 		if ((this.state as string) === "shutdown") {
 			throw new Error("Kernel has been shut down");
@@ -891,15 +934,15 @@ export class ReplKernelManager {
 			if (opts.signal?.aborted) {
 				return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
 			}
-			if ((this.state as string) === "shutdown") {
-				throw new Error("Kernel has been shut down");
-			}
 			// A repair started while this request was queued or busy-waiting: release
 			// the slot so the repair's own restore can run, then requeue behind it.
-			if (this.protocolRepairPromise && !opts.protocolRepair) {
+			if ((this.protocolRepairPromise || this.protocolDiscardPromise) && !opts.protocolRepair) {
 				resolveNext();
 				await this.waitForProtocolRepair(opts.signal);
 				return this.enqueueRequest(requestFields, code, opts, executionTimeoutMs);
+			}
+			if ((this.state as string) === "shutdown") {
+				throw new Error("Kernel has been shut down");
 			}
 			if (executionTimeoutMs === undefined) {
 				return await this.executeInner(requestFields, code, opts, started);
@@ -1179,6 +1222,7 @@ export class ReplKernelManager {
 		const started = Date.now();
 		while (this.activeExecution && Date.now() - started < KERNEL_BUSY_REUSE_WAIT_MS) {
 			if ((this.state as string) === "shutdown") {
+				if (this.protocolRepairPromise || this.protocolDiscardPromise) return;
 				throw new Error("Kernel has been shut down");
 			}
 			void this.interrupt().catch(() => undefined);
@@ -1328,11 +1372,14 @@ export class ReplKernelManager {
 		}
 	}
 
-	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won; a joiner's options are ignored - the first caller's policy wins). */
+	/** True when this call cleaned up or adopted repair cleanup. Concurrent user teardown keeps its original policy. */
 	async shutdown(opts: KernelShutdownOptions = {}): Promise<boolean> {
+		const joinedRepair = this.allowRepairIdle;
+		this.allowRepairIdle = false;
+		this.supersedeProtocolRepair();
 		if (this.terminationPromise) {
 			await this.terminationPromise;
-			return false;
+			return joinedRepair && this.isDefunct;
 		}
 		const inFlightShutdown = this.gracefulShutdownPromise;
 		if (inFlightShutdown) {
@@ -1465,9 +1512,10 @@ export class ReplKernelManager {
 		return this.terminate(true);
 	}
 
-	private async terminate(force: boolean): Promise<void> {
+	private async terminate(force: boolean, preserveRepair = false): Promise<void> {
+		if (!preserveRepair) this.allowRepairIdle = false;
 		if (this.terminationPromise) return this.terminationPromise;
-		this.supersedeProtocolRepair();
+		if (!preserveRepair) this.supersedeProtocolRepair();
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		const child = this.child;
@@ -1657,9 +1705,15 @@ export class ReplKernelManager {
 	/** Synchronous best-effort cleanup. Safe to call from `process.on('exit')`. */
 	disposeSync(): void {
 		this.supersedeProtocolRepair();
-		this.state = "shutdown";
-		liveKernels.delete(this);
-		this.cleanupResources();
+		this.allowRepairIdle = false;
+		try {
+			this.child?.kill("SIGTERM");
+		} catch {
+			/* Async cleanup retains the identity until exit is confirmed. */
+		}
+		void this.terminate(true).catch((error) =>
+			this.appendKernelDiagnostic(`synchronous cleanup unconfirmed: ${errorMessage(error)}`),
+		);
 	}
 
 	get isRunning(): boolean {

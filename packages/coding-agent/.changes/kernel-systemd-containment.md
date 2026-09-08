@@ -1,0 +1,2 @@
+- Added opt-in supervised Linux kernel containment with verified descendant exit and cleanup when the supervisor crashes.
+- Fixed kernel protocol repair discarding process ownership before cleanup completed and racing replacement startup after early exits.
