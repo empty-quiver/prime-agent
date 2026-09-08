@@ -1,6 +1,6 @@
 # Runtime hardening status
 
-This is a development branch, not a production-readiness claim. No supervisor deployment or 24–48-hour canary has been performed.
+This is a development branch, not a production-readiness claim. An isolated supervisor restart test has passed on Linux/ARM64. No production supervisor deployment or 24–48-hour canary has been performed.
 
 ## Implemented in this branch
 
@@ -15,7 +15,7 @@ This is a development branch, not a production-readiness claim. No supervisor de
 
 - A separately persisted account identity prevents a missing or replaced ledger from silently resetting allowance. Inconsistent saved deadlines fail closed. Coverage includes pre-publication runtime/daemon child requests, write failures, identity loss/replacement, and copied-family recovery through the SDK.
 
-Still to verify: complete supervisor-driven daemon recovery and interruption at every filesystem commit boundary. Deleting both the ledger and its identity marker requires a separate supervisor account anchor to distinguish corruption from a new account. These are release gates, not production guarantees.
+The opt-in supervisor additionally anchors the budget ID outside its ledger and refuses missing state even when both the ledger and its identity marker have disappeared. Complete daemon recovery and interruption at every filesystem commit boundary remain release gates.
 
 ### Kernel cancellation (workstream 3)
 
@@ -43,7 +43,7 @@ Remaining boundary: containment requires the supervised Linux configuration. Arb
 - Durable deadline/job/child waits now persist absolute deadlines, target generations and wake delivery claims. The loop stops while pending; stale/duplicate job notifications cannot wake it. The bundled `agent-wait` Python skill uses the existing host bridge.
 - One process-identity lease owns the wait file. Missing/corrupt lease metadata fails closed. A recovered delivery claim is paused, not replayed. Hosts must explicitly call `resumeWait()` after startup/recovery reconciliation; constructor recovery never starts model work before host initialization.
 - SDK operators inspect `waitState`/`waitError`, call `notifyWait()` for an external job report, or explicitly `cancelWait()` after reconciliation. Child/job deadlines report timeout when a completion report is missing. External jobs are not implicitly polled.
-- Automatic supervisor activation, operation recovery and structured worker-crash recovery remain in progress. No daemon command or event shape changed in this slice; notifications use existing custom-message and diagnostic envelopes.
+- The opt-in supervisor activates pending waits only after checking recovery state and binding extensions. Recovered in-flight wake delivery remains paused. Complete daemon child-worker recovery remains a release gate. No daemon command or event shape changed; notifications use existing custom-message and diagnostic envelopes.
 
 ### OAuth refresh isolation (workstream 5)
 
@@ -70,13 +70,18 @@ Mixed-version warning: an older executable does not understand the new attempt m
 - SDK `recoveryIssues` exposes unknown operations. `reconcileOperation(id, outcome, evidence)` requires operator evidence and is not exposed as a model tool. Known completions missing transcript results receive a recovery notice instead of replay.
 - Coverage includes restart through the SDK, an abruptly exiting separate OS process, failed completion-receipt writes, legacy unfinished cells and late completion races.
 - Completed receipt files are retained on disk; long-session receipt retention/compaction remains a release gate. This journal does not provide exactly-once semantics for remote services or contain an escaped process.
+- The opt-in supervisor persists a one-time session/budget/inbox identity anchor. Startup never creates a replacement session or allowance. Paths remain inside the copied state family, and one process-identity lease owns the supervisor.
+- Durable inbox records precede dispatch, survive process crashes and reject changed payloads with the same message ID. Interrupted delivery is unknown, not automatically replayed. Completed tombstones retain deduplication identity but omit message bodies. Pending records and total tombstones have fail-closed capacity limits.
+- Signal intake uses account/sender/device/timestamp/group identity, explicit sender/group allowlists, bounded buffers and connection/idle deadlines. It ignores sync echoes and fails closed on an event it cannot durably admit. The Signal SSE endpoint has no durable replay acknowledgment: messages lost upstream of local admission are not recoverable by this bridge.
+- The systemd template uses a watchdog, bounded restart backoff, startup-error restart prevention, memory limits and process-group teardown. Its standalone entrypoint writes private progress-aware health state and pauses uncertain operations instead of retrying them.
+- Linux/ARM64 validation passed 33 tests across seven files, including SIGKILL of the actual supervisor entrypoint followed by same-session restart with unchanged budget identity and usage. The live Spark service and Signal bridge were not changed.
 
 ## Remaining work
 
 1. **Budget integration release gates (workstream 2):** complete the remaining recovery, pre-publication, and ledger fault checks listed above; review provider request bounds and cancellation cleanup alongside workstreams 3 and 7.
 2. **Explicit waits (workstream 4):** persist typed deadline/job/child conditions and wake generations; end the parent turn without injecting immediate continuations; expose provider deadlines and classify cancellation, timeout, provider failure and worker crash. Retry only when outcome classification permits it.
 3. **Extension timers and memory release gates (workstream 6):** complete long-duration canary and Linux worker containment checks. Callback ownership and two bounded retention fixes are implemented; historical OOM attribution remains unknown.
-4. **Restart integration (workstream 7):** deploy the durable session supervisor, wire wait activation after recovery, deduplicate Signal message IDs, use supported idempotency keys, add progress-aware health checks and bounded restart backoff, pin Python dependencies, and verify complete worker containment. Operation journaling and wait ownership are implemented but are not a deployed supervisor.
+4. **Restart integration (workstream 7):** finish pinned Python runtime verification, outbound idempotency/outcome handling, and complete child-worker recovery; validate the deployment template and run the canary. The opt-in supervisor, wait activation, Signal deduplication, health checks and bounded-backoff template are implemented and isolated restart-tested, but not production-deployed.
 5. **Release gate:** run isolated Linux/ARM64 fault tests, review all cross-worker boundaries, then a 24–48-hour copied-session canary with isolated credentials and external effects. No production deployment until these gates pass.
 
 ## Verification entry points

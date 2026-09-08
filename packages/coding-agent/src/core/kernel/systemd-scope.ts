@@ -63,17 +63,7 @@ async function capture(unit: string, child: ChildProcess): Promise<ScopeIdentity
 	throw new Error("Kernel scope identity was not confirmed; replacement is blocked");
 }
 
-/** Scopes inherit the caller environment directly: no credential-bearing CLI arguments or env files. */
-export function spawnKernelProcess(
-	command: string,
-	args: string[],
-	options: SpawnOptions,
-): {
-	child: ChildProcess;
-	ownershipReady?: Promise<void>;
-} {
-	const environment = options.env ?? process.env;
-	if (environment.PRIME_AGENT_KERNEL_SYSTEMD !== "1") return { child: spawn(command, args, options) };
+export function verifySupervisorOwnership(environment: NodeJS.ProcessEnv = process.env): string {
 	if (process.platform !== "linux") throw new Error("Kernel systemd containment requires Linux");
 	const parent = environment.PRIME_AGENT_SUPERVISOR_UNIT;
 	if (!parent || !/^[A-Za-z0-9_.@:-]+\.service$/.test(parent))
@@ -95,6 +85,21 @@ export function spawnKernelProcess(
 	) {
 		throw new Error("Kernel owner is not contained by the declared supervisor service");
 	}
+	return parent;
+}
+
+/** Scopes inherit the caller environment directly: no credential-bearing CLI arguments or env files. */
+export function spawnKernelProcess(
+	command: string,
+	args: string[],
+	options: SpawnOptions,
+): {
+	child: ChildProcess;
+	ownershipReady?: Promise<void>;
+} {
+	const environment = options.env ?? process.env;
+	if (environment.PRIME_AGENT_KERNEL_SYSTEMD !== "1") return { child: spawn(command, args, options) };
+	const parent = verifySupervisorOwnership(environment);
 	const unit = `prime-kernel-${randomUUID()}.scope`;
 	const child = spawn(
 		"systemd-run",

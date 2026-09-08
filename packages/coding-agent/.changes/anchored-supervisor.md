@@ -1,0 +1,2 @@
+- Added an opt-in anchored-session supervisor with durable inbox deduplication, explicit uncertain-delivery recovery, progress-aware health reporting, and a bounded-restart systemd template.
+- Added bounded, allowlisted Signal SSE intake with stable message identities and fail-closed admission errors.
