@@ -8,6 +8,7 @@ import type { ExtensionContext } from "../src/core/extensions/types.js";
 import { type KernelClient, ReplKernelManager } from "../src/core/kernel/index.js";
 import { terminateOwnedChild } from "../src/core/kernel/terminate-child.js";
 import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import { createHarness } from "./suite/harness.js";
 
 const directories: string[] = [];
 const managers: ReplKernelManager[] = [];
@@ -55,6 +56,46 @@ process.stdout.write(JSON.stringify({ event: "ready", protocol: 3 }) + "\\n");
 }
 
 describe("confirmed kernel termination", () => {
+	it("does not report session disposal success when its kernel exit is unconfirmed", async () => {
+		const harness = await createHarness({ tools: [] });
+		try {
+			Reflect.set(harness.session, "_ipythonKernelProvisioner", {
+				dispose: async () => {
+					throw new Error("exit unconfirmed");
+				},
+			});
+			await expect(harness.session.disposeAsync()).rejects.toThrow("exit unconfirmed");
+			expect(Reflect.get(harness.session, "_disposed")).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+	it("quarantines failed startup when cleanup cannot confirm exit", async () => {
+		const start = vi.spyOn(ReplKernelManager.prototype, "start").mockRejectedValue(new Error("startup failed"));
+		const shutdown = vi
+			.spyOn(ReplKernelManager.prototype, "shutdown")
+			.mockRejectedValue(new Error("exit unconfirmed"));
+		const kill = vi.spyOn(ReplKernelManager.prototype, "kill").mockResolvedValue();
+		try {
+			const provisioner = new IpythonKernelProvisioner(process.cwd(), {});
+			await expect(provisioner.ensure()).rejects.toThrow("replacement blocked");
+			const manager = provisioner.manager;
+			expect(manager).toBeDefined();
+			await expect(provisioner.ensure()).rejects.toThrow("replacement blocked");
+			expect(start).toHaveBeenCalledTimes(1);
+			await provisioner.kill();
+			expect(kill).toHaveBeenCalledTimes(1);
+			expect(provisioner.manager).toBeUndefined();
+			shutdown.mockResolvedValue(true);
+			await expect(provisioner.ensure()).rejects.toThrow("startup failed");
+			expect(start).toHaveBeenCalledTimes(2);
+		} finally {
+			start.mockRestore();
+			shutdown.mockRestore();
+			kill.mockRestore();
+		}
+	});
+
 	it("quarantines a failed dispose and refuses to boot its replacement", async () => {
 		const manager = {
 			shutdown: vi.fn(async () => {

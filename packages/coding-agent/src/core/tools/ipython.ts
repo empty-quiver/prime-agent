@@ -308,6 +308,8 @@ export interface IpythonToolOptions {
 export class IpythonKernelProvisioner {
 	private managerPromise?: Promise<KernelClient>;
 	private startedManager?: KernelClient;
+	private quarantinedManager?: KernelClient;
+	private startupCleanupError?: Error;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
@@ -327,7 +329,7 @@ export class IpythonKernelProvisioner {
 
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
-		return this.startedManager;
+		return this.startedManager ?? this.quarantinedManager;
 	}
 
 	/** Result of reviving a prior session's namespace on the last kernel start, if any. */
@@ -366,11 +368,14 @@ export class IpythonKernelProvisioner {
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
 		this.disposeController.abort();
-		const pending = this.managerPromise;
+		const pending =
+			this.managerPromise ?? (this.quarantinedManager ? Promise.resolve(this.quarantinedManager) : undefined);
 		if (!pending) return;
 		this.disposePromise = (async () => {
-			const m = await pending.catch(() => undefined);
+			const m = await pending.catch(() => this.quarantinedManager);
 			if (m) await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
+			this.quarantinedManager = undefined;
+			this.startupCleanupError = undefined;
 			if (this.managerPromise === pending) {
 				this.managerPromise = undefined;
 				this.startedManager = undefined;
@@ -381,11 +386,14 @@ export class IpythonKernelProvisioner {
 
 	async kill(): Promise<void> {
 		if (this.killPromise) return this.killPromise;
-		const pending = this.managerPromise;
+		const pending =
+			this.managerPromise ?? (this.quarantinedManager ? Promise.resolve(this.quarantinedManager) : undefined);
 		if (!pending) return;
 		const operation = (async () => {
-			const m = await pending.catch(() => undefined);
+			const m = await pending.catch(() => this.quarantinedManager);
 			if (m) await m.kill();
+			this.quarantinedManager = undefined;
+			this.startupCleanupError = undefined;
 			if (this.managerPromise === pending) {
 				this.managerPromise = undefined;
 				this.startedManager = undefined;
@@ -406,6 +414,7 @@ export class IpythonKernelProvisioner {
 		if (this.killPromise) {
 			return raceWithAbort(this.killPromise, signal).then(() => this.ensure(onProgress, signal));
 		}
+		if (this.startupCleanupError) return Promise.reject(this.startupCleanupError);
 		// Only a terminally dead kernel drops the memo; a repairing manager (idle/starting) recovers itself.
 		if (this.startedManager?.isDefunct) {
 			this.managerPromise = undefined;
@@ -538,7 +547,16 @@ export class IpythonKernelProvisioner {
 				// surface the failure before the teardown (final snapshot flush included)
 				// finished, or a replacement provisioner gated on this dispose could
 				// race the still-flushing kernel over the same snapshot files.
-				await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true }).catch(() => undefined);
+				try {
+					await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
+				} catch (cleanupError) {
+					this.quarantinedManager = m;
+					this.startupCleanupError = new AggregateError(
+						[error, cleanupError],
+						"Kernel startup cleanup failed; exit unconfirmed and replacement blocked",
+					);
+					throw this.startupCleanupError;
+				}
 				throw error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —

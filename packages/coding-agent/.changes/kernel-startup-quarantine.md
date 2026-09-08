@@ -1,0 +1,1 @@
+- Fixed failed kernel startup and session disposal reporting success before kernel exit was confirmed; replacement now remains blocked until cleanup succeeds.

@@ -4202,16 +4202,16 @@ export class AgentSession {
 			if (run.detachedDeletion) {
 				run.suppressTerminalNotice = true;
 				if (run.deletionCleanupObserver) {
-					await run.deletionCleanupObserver.catch(() => false);
+					if (!(await run.deletionCleanupObserver)) await childSession.disposeAsync();
 				} else if (run.deletionCleanup) {
-					await run.deletionCleanup.catch(() => childSession.disposeAsync().catch(() => undefined));
+					await run.deletionCleanup.catch(() => childSession.disposeAsync());
 				} else {
 					// Cleanup already failed and was exposed for retry before disposal.
-					await childSession.disposeAsync().catch(() => undefined);
+					await childSession.disposeAsync();
 				}
 				if (!run.settled) await this._finishRlmRunDeletion(run);
 			} else {
-				await childSession.disposeAsync().catch(() => undefined);
+				await childSession.disposeAsync();
 			}
 		}
 		for (const unsubscribe of this._rlmChildUnsubscribes.values()) {
@@ -4219,16 +4219,12 @@ export class AgentSession {
 		}
 		this._rlmChildUnsubscribes.clear();
 		for (const { session } of this._rlmChildSessions.values()) {
-			await session.disposeAsync().catch(() => undefined);
+			await session.disposeAsync();
 		}
 		this._rlmChildSessions.clear();
 		this._rlmChildCleanupFailures.clear();
 		this._deletedRlmChildIds.clear();
-		try {
-			await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
-		} catch {
-			// a failed kernel startup already cleaned up after itself
-		}
+		await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
 		this.dispose();
 		await this._disposeCallbacksPromise;
 	}
