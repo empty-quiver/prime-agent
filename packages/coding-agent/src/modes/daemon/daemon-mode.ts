@@ -2626,6 +2626,7 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
+		await options.parentSession.executionBudget?.snapshot();
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,
@@ -2641,6 +2642,7 @@ export class AgentDaemon {
 				sessionStartEvent: { type: "session_start", reason: "startup" },
 				sessionConfig: parentState.runtime.runtimeConfig,
 				sessionOptions: {
+					executionBudget: options.parentSession.executionBudget,
 					model: options.model,
 					thinkingLevel: options.thinkingLevel,
 					serviceTier: options.serviceTier,
@@ -3044,6 +3046,7 @@ export class AgentDaemon {
 		let runtime: AgentSessionRuntime | undefined;
 		let sessionLease: SessionLease | undefined;
 		try {
+			await parentState.runtime.session.executionBudget?.snapshot();
 			sessionLease = acquireSessionLease(entry.sessionFile, parentState.runtime.services.agentDir);
 			const sessionManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
 			const modelRegistry = parentState.runtime.services.modelRegistry;
@@ -3063,6 +3066,7 @@ export class AgentDaemon {
 					sessionConfig: parentState.runtime.runtimeConfig,
 					sessionLease,
 					sessionOptions: {
+						executionBudget: parentState.runtime.session.executionBudget,
 						...(rehydratedModel ? { model: rehydratedModel } : {}),
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),

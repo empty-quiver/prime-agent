@@ -85,6 +85,12 @@ function parseState(text: string): ExecutionBudgetState {
 		)
 	)
 		throw new Error("Invalid execution budget state; refusing to reset its allowance");
+	if (
+		(value.limits.timeoutMs !== undefined && value.deadline !== value.startedAt + value.limits.timeoutMs) ||
+		(value.limits.timeoutMs === undefined && value.deadline !== undefined) ||
+		Object.keys(value.pending).length > value.modelRequests
+	)
+		throw new Error("Inconsistent execution budget state; refusing to reset its allowance");
 	return value as unknown as ExecutionBudgetState;
 }
 
@@ -114,7 +120,12 @@ export class ExecutionBudget implements AgentExecutionGovernor {
 			pending: {},
 		};
 		if (limits.timeoutMs !== undefined) this.state.deadline = this.state.startedAt + limits.timeoutMs;
-		if (this.path && existsSync(this.path)) this.state = parseState(readFileSync(this.path, "utf8"));
+		if (this.path) {
+			if (existsSync(`${this.path}.identity`) && !existsSync(this.path))
+				throw new Error("Execution budget ledger is missing; refusing a fresh allowance");
+			if (existsSync(this.path)) this.state = parseState(readFileSync(this.path, "utf8"));
+			this.verifyIdentity(this.state);
+		}
 		this.armDeadline();
 	}
 
@@ -124,6 +135,12 @@ export class ExecutionBudget implements AgentExecutionGovernor {
 
 	get cachedState(): ExecutionBudgetState {
 		return structuredClone(this.state);
+	}
+
+	private verifyIdentity(state: ExecutionBudgetState): void {
+		if (!this.path || !existsSync(`${this.path}.identity`)) return;
+		const identity: unknown = JSON.parse(readFileSync(`${this.path}.identity`, "utf8"));
+		if (identity !== state.id) throw new Error("Execution budget identity changed; refusing a fresh allowance");
 	}
 
 	private armDeadline(): void {
@@ -164,15 +181,25 @@ export class ExecutionBudget implements AgentExecutionGovernor {
 					})
 				: undefined;
 			try {
+				if (this.path && existsSync(`${this.path}.identity`) && !existsSync(this.path))
+					throw new Error("Execution budget ledger is missing; refusing a fresh allowance");
 				const next =
 					this.path && existsSync(this.path)
 						? parseState(readFileSync(this.path, "utf8"))
 						: structuredClone(this.state);
+				this.verifyIdentity(next);
 				if (next.deadline !== undefined && Date.now() >= next.deadline) next.exhausted ??= "deadline";
 				const result = update(next);
 				if (compromised) throw compromised;
-				if (this.path)
+				if (this.path) {
 					writeFileAtomicSync(this.path, JSON.stringify(next), { mode: 0o600, fsync: true, fsyncDir: true });
+					if (!existsSync(`${this.path}.identity`))
+						writeFileAtomicSync(`${this.path}.identity`, JSON.stringify(next.id), {
+							mode: 0o600,
+							fsync: true,
+							fsyncDir: true,
+						});
+				}
 				this.state = next;
 				this.armDeadline();
 				return result;

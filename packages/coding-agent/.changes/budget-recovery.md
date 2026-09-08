@@ -1,0 +1,2 @@
+- Fixed shared budget admission before child startup, preserved budget options through runtime creation, and rejected missing or replaced ledgers during recovery.
+- Fixed relative budget references when copying session families across canonical filesystem paths.

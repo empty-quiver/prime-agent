@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
@@ -1507,7 +1507,9 @@ export class AgentSession {
 		this._autonomousTokenCap = config.autonomous?.maxTokens;
 		const executionBudget =
 			config.executionBudget ??
-			(config.executionBudgetLimits || this._autonomousState.enabled || (budgetPath && existsSync(budgetPath))
+			(config.executionBudgetLimits ||
+			this._autonomousState.enabled ||
+			(budgetPath && (existsSync(budgetPath) || existsSync(`${budgetPath}.identity`)))
 				? new ExecutionBudget(
 						config.executionBudgetLimits ?? {
 							maxModelRequests: config.autonomous?.maxTurns ?? autonomousLimits.maxTurns,
@@ -1520,11 +1522,15 @@ export class AgentSession {
 		if (executionBudget) this.agent.executionGovernor = executionBudget;
 		if (config.executionBudget?.path && referencePath) {
 			mkdirSync(artifactDir!, { recursive: true });
-			writeFileAtomicSync(referencePath, JSON.stringify(relative(artifactDir!, config.executionBudget.path)), {
-				mode: 0o600,
-				fsync: true,
-				fsyncDir: true,
-			});
+			writeFileAtomicSync(
+				referencePath,
+				JSON.stringify(relative(realpathSync(artifactDir!), config.executionBudget.path)),
+				{
+					mode: 0o600,
+					fsync: true,
+					fsyncDir: true,
+				},
+			);
 		}
 		if (config.executionBudget === undefined) this._ownedExecutionBudget = executionBudget;
 		this._bindExecutionBudgetCancellation();
@@ -11046,7 +11052,7 @@ export class AgentSession {
 					mkdirSync(childArtifactDir, { recursive: true });
 					writeFileAtomicSync(
 						join(childArtifactDir, "execution-budget-reference.json"),
-						JSON.stringify(relative(childArtifactDir, this.executionBudget.path)),
+						JSON.stringify(relative(realpathSync(childArtifactDir), this.executionBudget.path)),
 						{ mode: 0o600, fsync: true, fsyncDir: true },
 					);
 				}

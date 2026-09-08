@@ -724,6 +724,9 @@ export function resolveRuntimeSessionOptions(
 	runtimeSessionOptions?: CreateAgentSessionOptions,
 ): CreateAgentSessionOptions {
 	return {
+		executionBudget: runtimeSessionOptions?.executionBudget ?? sessionOptions.executionBudget,
+		executionBudgetLimits: runtimeSessionOptions?.executionBudgetLimits ?? sessionOptions.executionBudgetLimits,
+		executionBudgetPath: runtimeSessionOptions?.executionBudgetPath ?? sessionOptions.executionBudgetPath,
 		model: runtimeSessionOptions?.model ?? sessionOptions.model,
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,

@@ -8,12 +8,14 @@ This is a development branch, not a production-readiness claim. No supervisor de
 
 - Agent-core admits model requests and actual tool execution inside the loop, before dispatch. Failed attempts count; a two-turn endless-tool provider cannot obtain a third request.
 - `ExecutionBudget` serializes durable reservations across processes, reconciles successful usage before listeners can attribute child usage, and retains unknown reservations. Restarting with higher requested limits does not replace the saved account or exhaustion.
-- Inline children share the account; hosted children inherit it at publication and persist a relative account reference for recovery. Compaction, refinement, branch-summary retries, side questions, daemon status summaries, kernel host requests, and autonomous quality gates also use admission.
+- Inline and hosted children receive the shared account before construction or extension startup and persist a canonical relative account reference for recovery. The production runtime factory forwards budget options. Compaction, refinement, branch-summary retries, side questions, daemon status summaries, kernel host requests, and autonomous quality gates also use admission.
 - Deadlines abort model/tool work and auxiliary operations. Host waits remain bounded even when a provider ignores cancellation.
 - SDK `executionBudgetLimits` configures independent model-request, tool-call, token, cost, and elapsed limits. Explicit autonomous `maxTokens` is a strict reservation cap. The pre-existing **default** 80,000-token continuation target remains a soft target; it is not advertised as a hard cap.
 - Strict token admission conservatively reserves the model's full accepted context plus output ceiling. A cap smaller than this allowance refuses admission. Cost caps require an explicit host-supplied worst-case per-request charge; catalog prices alone are not a guaranteed billing bound. Provider violations exhaust the account and are reported, not concealed.
 
-Still to verify: complete daemon recovery and pre-publication extension paths, copied-family account references, and fault-injection coverage for interrupted ledger writes. These are release gates, not production guarantees.
+- A separately persisted account identity prevents a missing or replaced ledger from silently resetting allowance. Inconsistent saved deadlines fail closed. Coverage includes pre-publication runtime/daemon child requests, write failures, identity loss/replacement, and copied-family recovery through the SDK.
+
+Still to verify: complete supervisor-driven daemon recovery and interruption at every filesystem commit boundary. Deleting both the ledger and its identity marker requires a separate supervisor account anchor to distinguish corruption from a new account. These are release gates, not production guarantees.
 
 ### Kernel cancellation (workstream 3)
 
@@ -75,7 +77,7 @@ Mixed-version warning: an older executable does not understand the new attempt m
 
 ## Verification entry points
 
-Budget coverage: `test/suite/execution-budget.test.ts`, `test/suite/agent-session-autonomous.test.ts`, and `test/provider-retry.test.ts` in coding-agent; `test/agent-loop.test.ts` and `test/agent.test.ts` in agent-core. The budget suite includes a three-OS-process admission race and delegated-child accounting.
+Budget coverage: `test/suite/execution-budget.test.ts`, `test/suite/execution-budget-recovery.test.ts`, `test/suite/agent-session-autonomous.test.ts`, and `test/provider-retry.test.ts` in coding-agent; `test/agent-loop.test.ts` and `test/agent.test.ts` in agent-core. The budget suites include a three-OS-process admission race, pre-publication delegated accounting, write faults, and copied-family recovery.
 
 From `packages/coding-agent`, use the repository's targeted Vitest command on `test/kernel-termination-safety.test.ts`, `test/oauth-refresh-safety.test.ts`, the kernel abort/startup/shutdown/protocol suites, `test/ipython-provisioner.test.ts`, `test/orphan-process-journal.test.ts`, `test/auth-storage.test.ts`, and the three `test/readiness-*.test.ts` acceptance files.
 
