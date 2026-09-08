@@ -1,6 +1,6 @@
 # Runtime hardening status
 
-This is a development branch, not a production-readiness claim. An isolated supervisor restart test has passed on Linux/ARM64. No production supervisor deployment or 24–48-hour canary has been performed.
+This is a development branch, not a production-readiness claim. An isolated supervisor restart test has passed on Linux/ARM64. A 24-hour copied-session canary started at 2026-09-08 20:17:46 UTC; it has not yet completed. No production supervisor deployment has been performed.
 
 ## Implemented in this branch
 
@@ -78,9 +78,11 @@ Mixed-version warning: an older executable does not understand the new attempt m
 - The opt-in Signal send tool uses a separately anchored durable outbox, host tool-call IDs, recipient allowlists, bounded requests and validated acknowledgments. Concurrent/restarted acknowledged sends deduplicate locally. Uncertain sends block continuation and further sending; missing outbound identity fails startup. Signal does not offer a documented server idempotency key, so unknown sends require operator evidence, not automatic retry. Tests use synthetic endpoints only.
 - Signal intake uses account/sender/device/timestamp/group identity, explicit sender/group allowlists, bounded buffers and connection/idle deadlines. It ignores sync echoes and fails closed on an event it cannot durably admit. The Signal SSE endpoint has no durable replay acknowledgment: messages lost upstream of local admission are not recoverable by this bridge.
 - The systemd template uses a watchdog, bounded restart backoff, startup-error restart prevention, memory limits and process-group teardown. Its standalone entrypoint writes private progress-aware health state and pauses uncertain operations instead of retrying them.
+- Unattended startup refuses missing saved models and silent model fallback. Health includes detached child and queued session work in no-progress detection. Linux tests cover configured-model recovery and missing-model refusal without contacting a model endpoint.
 - Worker and kernel scopes share a verified dedicated slice for aggregate memory/task limits. Individual kernels also have finite memory/task caps and group OOM termination. Linux/ARM64 passed 68 tests across ten files after correcting an unsupported systemd property during fault testing; coverage includes the kernel cgroup limits, pinned runtime, SIGKILL recovery, protocol repair, child outcomes and outbound uncertainty.
 - Linux/ARM64 validation passed 33 tests across seven files, including SIGKILL of the actual supervisor entrypoint followed by same-session restart with unchanged budget identity and usage. The live Spark service and Signal bridge were not changed.
 - Added exact, hash-checked Linux/ARM64 Python 3.12 dependency pins and non-editable runtime/skill installation. Sealed fingerprints are checked at supervisor and kernel startup without running site startup hooks during inspection. Changed environments fail closed instead of reinstalling dependencies. Four additional Linux tests passed, including real pinned Python kernel execution and supervisor restart with fingerprint verification. See [deployment and recovery instructions](../packages/coding-agent/deploy/README.md).
+- A network-isolated 24-hour canary now uses a byte-verified copy of the real saved transcript with faux providers, real pinned Python, four concurrent child kernels, synthetic Signal-shaped deduplication, durable waits, periodic same-session reopen and post-GC metrics/heap snapshots. A two-cycle rehearsal passed first. Historic cells, credentials and kernel snapshots were not replayed or imported. The canary enforces duration, cycle coverage, bounded gaps and explicit memory gates; elapsed time alone is insufficient. Its data and heap profiles remain private.
 
 ## Remaining work
 

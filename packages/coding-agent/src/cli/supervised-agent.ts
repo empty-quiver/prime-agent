@@ -74,17 +74,28 @@ try {
 	process.env.PRIME_AGENT_PINNED_SOURCE_ROOT = config.sourceRoot;
 	supervisor = await SessionSupervisor.open(
 		config.anchor,
-		async (file, budget, outbox) =>
-			(
-				await createAgentSession({
-					cwd: config.cwd,
-					agentDir: config.agentDir,
-					sessionManager: SessionManager.open(file),
-					executionBudget: budget,
-					customTools: config.signalOutbound ? [createSignalSendTool(config.signalOutbound, outbox)] : [],
-					prewarmIpythonKernel: false,
-				})
-			).session,
+		async (file, budget, outbox) => {
+			const manager = SessionManager.open(file);
+			const expected = manager.buildSessionContext().model;
+			const result = await createAgentSession({
+				cwd: config.cwd,
+				agentDir: config.agentDir,
+				sessionManager: manager,
+				executionBudget: budget,
+				customTools: config.signalOutbound ? [createSignalSendTool(config.signalOutbound, outbox)] : [],
+				prewarmIpythonKernel: false,
+			});
+			if (
+				!expected ||
+				result.modelFallbackMessage ||
+				result.session.model?.provider !== expected.provider ||
+				result.session.model?.id !== expected.modelId
+			) {
+				await result.session.disposeAsync({ kernelSnapshot: false });
+				throw new Error("Saved model could not be restored; refusing unattended model fallback");
+			}
+			return result.session;
+		},
 		config.maxSilentMs,
 	);
 	exitCode = 75;

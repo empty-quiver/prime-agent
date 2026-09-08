@@ -46,6 +46,8 @@ Supervisor configuration uses absolute paths:
 
 Adapt `prime-agent-supervised.service` to the pinned checkout, Node executable, Python and config paths. Install it and `prime-agent.slice` as **user** units, not system units. Kernel scopes verify their owning user-service invocation and cgroup, and bind their lifetime to it. Never start this beside another owner of the same session or another Signal intake for that session.
 
+The saved provider/model must remain configured and available. Unattended startup refuses model fallback rather than switching providers, pricing or capabilities silently. Configure credentials deliberately before deployment; a startup error does not authorize automatic migration to another model.
+
 The supervisor writes `health.json` privately next to the anchor. Durable waits are healthy waiting states; active execution without progress reaches a deadline. Unknown operations or interrupted wake deliveries pause for operator reconciliation. SIGTERM requests cleanup; systemd provides final process containment if the bounded cleanup cannot finish. The dedicated slice limits the aggregate worker and kernel memory to 8 GiB and task count to 2,048. Each kernel scope additionally has a 2 GiB/256-task cap and `OOMPolicy=kill`. Configured slice identity and finite limits are verified before kernel launch. These are containment defaults to tune against measurements, not a fix for retained-memory bugs.
 
 ## Signal intake and recovery
@@ -62,4 +64,4 @@ Optional `signalOutbound` configuration separately specifies `url`, sending `acc
 
 The targeted tests include copied-family recovery, duplicate owner refusal, budget identity loss, uncertain inbox dispatch, Signal framing/bounds, pinned runtime drift, real Python execution and SIGKILL/restart of the actual supervisor entrypoint. Linux process tests run only in explicitly isolated user services. No test uses live Signal messages or paid model requests.
 
-The required 24–48-hour copied-session canary has not yet completed. This template is not a production-readiness signoff.
+The required 24–48-hour copied-session canary started on 2026-09-08 at 20:17:46 UTC and has not yet completed. Its runner is `test/suite/copied-session-canary-worker.ts`; its two-cycle Linux regression uses the official faux-provider test harness and real pinned kernels. The long run uses a private copied transcript, no live credentials, a private network namespace, fixed safe cells, four-way child work, durable waits, periodic reopen and retained heap profiles. Do not put real transcripts, manifests containing private paths or heap snapshots into the repository. This template is not a production-readiness signoff.

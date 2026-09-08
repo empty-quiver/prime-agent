@@ -6905,6 +6905,9 @@ export class AgentSession {
 			this.unfinishedActionCount > 0
 		);
 	}
+	get hasPendingChildWork(): boolean {
+		return this._hasUnsettledRlmQuiescenceWork();
+	}
 
 	getSessionActionSnapshot(): SessionActionSnapshot {
 		const steering = visibleSessionActionProjection(this._actionStore.queuedActions("next_turn_boundary")).map(

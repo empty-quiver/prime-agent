@@ -130,6 +130,9 @@ it("pauses unfinished operations and distinguishes durable waiting from active n
 		const streaming = vi.spyOn(supervisor.session, "isStreaming", "get").mockReturnValue(true);
 		expect(supervisor.health(Date.now() + 2000).state).toBe("stalled");
 		streaming.mockRestore();
+		const childWork = vi.spyOn(supervisor.session, "hasPendingChildWork", "get").mockReturnValue(true);
+		expect(supervisor.health(Date.now() + 2000).state).toBe("stalled");
+		childWork.mockRestore();
 	} finally {
 		await supervisor?.close();
 		await harness.session.disposeAsync();

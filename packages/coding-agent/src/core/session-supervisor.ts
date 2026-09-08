@@ -172,8 +172,7 @@ export class SessionSupervisor {
 
 	health(now = Date.now()): SupervisorHealth {
 		const wait = this.session.waitState;
-		const busy =
-			this.session.isStreaming || this.session.isCompacting || this.session.isRetrying || this.session.isBashRunning;
+		const busy = this.session.isSessionActive || this.session.hasPendingChildWork;
 		let state: SupervisorHealth["state"] = busy ? "working" : "idle";
 		let reason: string | undefined;
 		if (wait && ["pending", "ready"].includes(wait.status)) {

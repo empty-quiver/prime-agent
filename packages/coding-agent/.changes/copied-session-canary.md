@@ -1,0 +1,2 @@
+- Added a network-isolated copied-session canary covering pinned kernels, concurrent children, durable waits, same-session reopen and measured heap retention.
+- Refused unattended model fallback and included detached child work in supervisor progress checks.

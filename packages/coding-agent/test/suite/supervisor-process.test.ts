@@ -4,19 +4,22 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
 import { initializeSupervisorAnchor, type SupervisorHealth } from "../../src/core/session-supervisor.js";
 import { createHarness } from "./harness.js";
 
 const execute = promisify(execFile);
 
-it.skipIf(
-	process.platform !== "linux" ||
-		!process.env.PRIME_AGENT_SUPERVISOR_UNIT ||
-		!process.env.PRIME_AGENT_TEST_PINNED_PYTHON,
-)(
-	"restarts the actual systemd entrypoint into its anchored session after SIGKILL",
-	async () => {
+it
+	.skipIf(
+		process.platform !== "linux" ||
+			!process.env.PRIME_AGENT_SUPERVISOR_UNIT ||
+			!process.env.PRIME_AGENT_TEST_PINNED_PYTHON,
+	)
+	.each(["configured", "missing"] as const)(
+	"restores the actual systemd entrypoint safely with a %s saved model",
+	async (mode) => {
 		const harness = await createHarness({
 			tools: [],
 			persistSession: true,
@@ -40,7 +43,34 @@ it.skipIf(
 		};
 		try {
 			harness.session.setSessionName("isolated supervisor process fixture");
+			harness.sessionManager.appendMessage(fauxAssistantMessage("synthetic saved context"));
+			harness.sessionManager.appendModelChange("canary-local", "fixture");
+			writeFileSync(
+				join(harness.tempDir, "models.json"),
+				JSON.stringify({
+					providers: {
+						"canary-local": {
+							baseUrl: "http://127.0.0.1:0",
+							api: "openai-completions",
+							apiKey: "synthetic-not-a-credential",
+							models: [
+								{
+									id: "fixture",
+									name: "Fixture",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 128000,
+									maxTokens: 4096,
+								},
+							],
+						},
+					},
+				}),
+				{ mode: 0o600 },
+			);
 			await initializeSupervisorAnchor(anchor, harness.session);
+			if (mode === "missing") writeFileSync(join(harness.tempDir, "models.json"), JSON.stringify({ providers: {} }));
 			const sessionId = harness.session.sessionId;
 			const budgetId = harness.session.executionBudget!.cachedState.id;
 			await harness.session.disposeAsync();
@@ -62,7 +92,7 @@ it.skipIf(
 				"systemd-run",
 				[
 					"--user",
-					"--collect",
+					...(mode === "configured" ? ["--collect"] : []),
 					`--unit=${unit}`,
 					"--property=Type=exec",
 					"--property=KillMode=control-group",
@@ -88,6 +118,12 @@ it.skipIf(
 				{ timeout: 5000 },
 			);
 			created = true;
+			if (mode === "missing") {
+				await expect.poll(() => show("ExecMainStatus"), { timeout: 20_000 }).toBe("78");
+				expect(health()).toBeUndefined();
+				expect(JSON.parse(readFileSync(harness.session.executionBudget!.path!, "utf8")).modelRequests).toBe(0);
+				return;
+			}
 			await expect.poll(() => health()?.state, { timeout: 20_000 }).toBe("idle");
 			expect(health()?.sessionId).toBe(sessionId);
 			const invocation = await show("InvocationID");
@@ -109,8 +145,11 @@ it.skipIf(
 			}).catch(() => undefined);
 			throw new Error(`${error instanceof Error ? error.message : String(error)}\n${log?.stdout ?? ""}`);
 		} finally {
-			if (created && (await show("ExecStart")).includes(config))
+			if (created && (await show("ExecStart")).includes(config)) {
 				await execute("systemctl", ["--user", "stop", unit], { timeout: 50_000 });
+				if ((await show("ExecStart")).includes(config))
+					await execute("systemctl", ["--user", "reset-failed", unit], { timeout: 2000 });
+			}
 			await harness.session.disposeAsync();
 			harness.cleanup();
 		}
