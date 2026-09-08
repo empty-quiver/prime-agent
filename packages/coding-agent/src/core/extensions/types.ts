@@ -414,6 +414,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	name: string;
 	/** Human-readable label for UI */
 	label: string;
+	/** Bounded cleanup join after cancellation, 0–30000 ms. Defaults to immediate return. */
+	cancellationGraceMs?: number;
 	/** Description for LLM */
 	description: string;
 	/** Optional short text extensions may use when composing custom prompts. */

@@ -660,6 +660,7 @@ export function createIpythonToolDefinition(
 	return {
 		name: "ipython",
 		label: "ipython",
+		cancellationGraceMs: 30_000,
 		description:
 			"Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
 		promptSnippet: "ipython - persistent Python REPL for code, state, and bash() orchestration",

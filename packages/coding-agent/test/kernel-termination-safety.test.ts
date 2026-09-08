@@ -3,11 +3,12 @@ import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.js";
 import { type KernelClient, ReplKernelManager } from "../src/core/kernel/index.js";
 import { terminateOwnedChild } from "../src/core/kernel/terminate-child.js";
-import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import { createIpythonTool, createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import { createHarness } from "./suite/harness.js";
 
 const directories: string[] = [];
@@ -56,6 +57,35 @@ process.stdout.write(JSON.stringify({ event: "ready", protocol: 3 }) + "\\n");
 }
 
 describe("confirmed kernel termination", () => {
+	it("session cancellation waits for a TERM-resistant kernel and keeps the operation unknown", async () => {
+		const { manager, child, readCells, directory } = await stuckKernel(true);
+		const provisioner = new IpythonKernelProvisioner(directory, {});
+		Object.assign(provisioner, { managerPromise: Promise.resolve(manager), startedManager: manager });
+		const harness = await createHarness({
+			persistSession: true,
+			tools: [createIpythonTool(directory, { provisioner })],
+			settings: { retry: { enabled: false }, compaction: { enabled: false } },
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("ipython", { code: "send_once()" }), { stopReason: "toolUse" }),
+			]);
+			const run = harness.session.prompt("perform synthetic action");
+			await vi.waitFor(() => expect(readCells()).toHaveLength(1));
+			harness.session.agent.abort();
+			await run;
+			expect(child.signalCode).toBe("SIGKILL");
+			expect(manager.isDefunct).toBe(true);
+			expect(readCells()).toHaveLength(1);
+			expect(harness.session.recoveryIssues).toHaveLength(1);
+			const result = harness.eventsOfType("tool_execution_end")[0];
+			expect(result.result.details).toMatchObject({ status: "aborted", outcome: "unknown", cleanup: "settled" });
+		} finally {
+			await provisioner.dispose();
+			await harness.session.disposeAsync();
+			harness.cleanup();
+		}
+	}, 12_000);
 	it("does not report session disposal success when its kernel exit is unconfirmed", async () => {
 		const harness = await createHarness({ tools: [] });
 		try {

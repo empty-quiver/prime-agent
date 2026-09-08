@@ -28,7 +28,9 @@ Still to verify: complete supervisor-driven daemon recovery and interruption at 
 - Protocol repair and failed startup now await confirmed cleanup before discarding manager state. An interrupted cell is rejected, not replayed. Scopes bind to the supervisor so its death also stops kernel descendants.
 - Linux/ARM64 integration tests passed for TERM-resistant detached descendants, early kernel exits, supervisor SIGKILL, and all 22 protocol-repair regressions. Enable with `PRIME_AGENT_KERNEL_SYSTEMD=1` and `PRIME_AGENT_SUPERVISOR_UNIT=<owning-user-service>.service`; this is not enabled on production.
 
-Remaining boundary: containment requires the supervised Linux configuration. Already-running host-side requests still need cancellation-join integration. Synchronous process-exit cleanup remains best effort outside systemd.
+- Agent-core now joins opted-in tool cleanup independently of the aborted execution signal, even if recording the unknown receipt fails. IPython opts into a 30-second maximum. Failed or unconfirmed cleanup is explicit, and aborted post-tool hooks do not overwrite that outcome. A full faux-provider session test confirms a TERM-resistant kernel exits before cancellation completes, without replay.
+
+Remaining boundary: containment requires the supervised Linux configuration. Arbitrary host-side callbacks cannot be forcibly stopped in-process. Synchronous process-exit cleanup remains best effort outside systemd; ownership handoff during synchronous disposal still needs a quarantine gate.
 
 ### Provider waits and child failure reporting (workstream 4)
 

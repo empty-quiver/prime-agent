@@ -15,6 +15,7 @@ import {
 import type { ModelExecutionReservation, ToolExecutionReceipt } from "./execution-governor.js";
 import { PendingEvents } from "./pending-events.js";
 import { createRequestDeadline, ProviderTimeoutError } from "./request-deadline.js";
+import { joinCancelledTool, type ToolCancellationJoin, validateCancellationGrace } from "./tool-cancellation.js";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -868,30 +869,31 @@ async function executePreparedToolCall(
 	const updateEvents = new PendingEvents();
 	let acceptingUpdates = true;
 	let receipt: ToolExecutionReceipt | undefined;
+	let operation: Promise<AgentToolResult<unknown>> | undefined;
+	let cancellationGraceMs = 0;
 
 	try {
+		cancellationGraceMs = validateCancellationGrace(prepared.tool.cancellationGraceMs);
 		throwIfAborted(signal);
 		await config.executionGovernor?.beforeTool(prepared.toolCall.id, prepared.toolCall.name);
 		throwIfAborted(signal);
 		receipt = await config.executionObserver?.beforeTool(prepared.toolCall.id, prepared.toolCall.name);
 		throwIfAborted(signal);
-		const result = await raceWithAbort(
-			prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
-				if (!acceptingUpdates || signal?.aborted) {
-					return;
-				}
-				updateEvents.add(
-					emit({
-						type: "tool_execution_update",
-						toolCallId: prepared.toolCall.id,
-						toolName: prepared.toolCall.name,
-						args: prepared.toolCall.arguments,
-						partialResult,
-					}),
-				);
-			}),
-			signal,
-		);
+		operation = prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
+			if (!acceptingUpdates || signal?.aborted) {
+				return;
+			}
+			updateEvents.add(
+				emit({
+					type: "tool_execution_update",
+					toolCallId: prepared.toolCall.id,
+					toolName: prepared.toolCall.name,
+					args: prepared.toolCall.arguments,
+					partialResult,
+				}),
+			);
+		});
+		const result = await raceWithAbort(operation, signal);
 		acceptingUpdates = false;
 		const details = result.details;
 		const status =
@@ -907,8 +909,33 @@ async function executePreparedToolCall(
 		return { result, isError: false };
 	} catch (error) {
 		acceptingUpdates = false;
-		await receipt?.settle(signal?.aborted ? "unknown" : "failed");
+		let cleanup: ToolCancellationJoin | undefined;
+		try {
+			await receipt?.settle(signal?.aborted ? "unknown" : "failed");
+		} finally {
+			if (signal?.aborted && operation) cleanup = await joinCancelledTool(operation, cancellationGraceMs);
+		}
 		await raceWithAbort(updateEvents.settle(), signal).catch(() => undefined);
+		if (signal?.aborted && cleanup) {
+			const suffix =
+				cleanup.status === "unconfirmed"
+					? " Cleanup did not confirm completion within the grace period."
+					: cleanup.status === "failed"
+						? ` Cleanup returned an error: ${cleanup.error}`
+						: " Tool cleanup settled.";
+			return {
+				result: {
+					content: [
+						{
+							type: "text",
+							text: `Tool execution aborted; external effects may be unknown.${suffix} Do not automatically repeat this operation.`,
+						},
+					],
+					details: { status: "aborted", outcome: "unknown", cleanup: cleanup.status },
+				},
+				isError: true,
+			};
+		}
 		return {
 			result: createErrorToolResult(
 				signal?.aborted ? "Tool execution aborted" : error instanceof Error ? error.message : String(error),
@@ -929,7 +956,7 @@ async function finalizeExecutedToolCall(
 	let result = executed.result;
 	let isError = executed.isError;
 
-	if (config.afterToolCall) {
+	if (config.afterToolCall && !signal?.aborted) {
 		try {
 			const afterResult = await maybePromiseWithAbort(
 				config.afterToolCall(

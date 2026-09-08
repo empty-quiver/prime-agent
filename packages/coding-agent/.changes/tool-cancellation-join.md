@@ -1,0 +1,1 @@
+- Fixed headless cancellation reporting completion before owned kernel cleanup settled, with a bounded grace period and explicit unconfirmed outcomes.

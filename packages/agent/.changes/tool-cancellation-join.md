@@ -1,0 +1,1 @@
+- Added bounded tool cleanup joins after cancellation and preserved unknown operation outcomes without automatic replay.
