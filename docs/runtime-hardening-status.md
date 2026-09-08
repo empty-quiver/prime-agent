@@ -31,7 +31,10 @@ Remaining boundary: arbitrary detached subprocess trees and already-running host
 - Auxiliary requests also have host deadlines and pass cancellation to built-in consumers. A provider that ignores cancellation cannot hold the host wait indefinitely; the host cannot prove its remote request stopped.
 - Timeout diagnostics classify the remote outcome and expenditure as unknown and prohibit automatic retry. Reservations remain held. Explicit caller cancellation remains distinct.
 - Failed child assistant messages no longer become successful child completions merely because the prompt promise resolved.
-- Durable deadline/job/child waits and structured worker-crash recovery remain in progress. No daemon wire shape or capability changed in this slice; diagnostics use the existing extensible diagnostic envelope.
+- Durable deadline/job/child waits now persist absolute deadlines, target generations and wake delivery claims. The loop stops while pending; stale/duplicate job notifications cannot wake it. The bundled `agent-wait` Python skill uses the existing host bridge.
+- One process-identity lease owns the wait file. Missing/corrupt lease metadata fails closed. A recovered delivery claim is paused, not replayed. Hosts must explicitly call `resumeWait()` after startup/recovery reconciliation; constructor recovery never starts model work before host initialization.
+- SDK operators inspect `waitState`/`waitError`, call `notifyWait()` for an external job report, or explicitly `cancelWait()` after reconciliation. Child/job deadlines report timeout when a completion report is missing. External jobs are not implicitly polled.
+- Automatic supervisor activation, operation recovery and structured worker-crash recovery remain in progress. No daemon command or event shape changed in this slice; notifications use existing custom-message and diagnostic envelopes.
 
 ### OAuth refresh isolation (workstream 5)
 

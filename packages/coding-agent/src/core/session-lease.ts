@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import { isProcessAlive } from "../utils/child-process.js";
 
 export const SESSION_LEASES_ENABLED_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
@@ -84,28 +85,31 @@ export function canonicalSessionPath(sessionPath: string): string {
 	}
 }
 
-// "absent" (missing/garbage) is safely stale; "unreadable" may be a LIVE lease and must never be reclaimed.
+// Invalid/missing owner records in an existing lease may belong to a live process.
 function readLeaseOwner(directory: string): SessionLeaseOwner | "absent" | "unreadable" {
 	let raw: string;
 	try {
 		raw = readFileSync(join(directory, "owner.json"), "utf8");
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
+		return (error as NodeJS.ErrnoException).code === "ENOENT" && !existsSync(directory) ? "absent" : "unreadable";
 	}
 	try {
 		const parsed = JSON.parse(raw) as Partial<SessionLeaseOwner>;
 		if (
 			parsed.version !== 1 ||
 			typeof parsed.token !== "string" ||
+			!parsed.token ||
 			typeof parsed.pid !== "number" ||
+			!Number.isInteger(parsed.pid) ||
+			parsed.pid <= 0 ||
 			typeof parsed.sessionPath !== "string" ||
 			typeof parsed.createdAt !== "string"
 		) {
-			return "absent";
+			return "unreadable";
 		}
 		return parsed as SessionLeaseOwner;
 	} catch {
-		return "absent";
+		return "unreadable";
 	}
 }
 
@@ -288,10 +292,12 @@ export function acquireSessionLease(
 				createdAt: new Date().toISOString(),
 			};
 			mkdirSync(candidateDirectory, { mode: 0o700 });
-			writeFileSync(join(candidateDirectory, "owner.json"), `${JSON.stringify(owner, null, 2)}\n`, {
-				mode: 0o600,
-			});
 			try {
+				writeFileAtomicSync(join(candidateDirectory, "owner.json"), `${JSON.stringify(owner, null, 2)}\n`, {
+					mode: 0o600,
+					fsync: true,
+					fsyncDir: true,
+				});
 				renameSync(candidateDirectory, directory);
 				return new SessionLease(canonicalPath, directory, token);
 			} catch (error) {

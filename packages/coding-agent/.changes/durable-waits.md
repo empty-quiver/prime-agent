@@ -1,0 +1,2 @@
+- Added durable deadline, child and job waits that suspend automatic continuation and reject stale completion generations.
+- Prevented automatic replay of interrupted wake deliveries and rejected corrupt session lease ownership metadata.

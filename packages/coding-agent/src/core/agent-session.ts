@@ -115,6 +115,13 @@ import {
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
+import {
+	DurableWait,
+	type DurableWaitState,
+	parseWaitCondition,
+	type WaitCondition,
+	type WaitOutcome,
+} from "./durable-wait.js";
 import { ExecutionBudget, type ExecutionBudgetLimits } from "./execution-budget.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
@@ -1098,6 +1105,78 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 
 export class AgentSession {
 	private _ownedExecutionBudget?: ExecutionBudget;
+	private readonly _durableWait: DurableWait;
+	private _waitWakeInFlight?: Promise<void>;
+
+	get waitState(): DurableWaitState | undefined {
+		return this._durableWait.snapshot();
+	}
+	get waitError(): string | undefined {
+		return this._durableWait.error;
+	}
+
+	startWait(condition: WaitCondition, reason: string): DurableWaitState {
+		if (condition.kind === "child" && condition.generation !== condition.id)
+			throw new Error("Child wait generation must match the unique child run id");
+		const state = this._durableWait.start(condition, reason);
+		if (condition.kind === "child") {
+			const run = this._activeRlmChildRuns.get(condition.id);
+			const settled = run?.settled || this._rlmChildSessions.has(condition.id);
+			if (settled)
+				this.notifyWait(
+					state.id,
+					"child",
+					condition.id,
+					condition.generation,
+					run?.status === "error" ? "failed" : run?.status === "cancelled" ? "cancelled" : "completed",
+				);
+		}
+		return this.waitState!;
+	}
+
+	notifyWait(id: string, kind: "job" | "child", target: string, generation: string, outcome: WaitOutcome): boolean {
+		return this._durableWait.notify(id, kind, target, generation, outcome);
+	}
+
+	cancelWait(): void {
+		this._durableWait.cancel();
+		this._scheduleSessionInputPump();
+	}
+
+	resumeWait(): void {
+		this._durableWait.resume();
+	}
+
+	private _scheduleWaitWake(): void {
+		if (this._waitWakeInFlight || this._disposed || this._disposing) return;
+		this._waitWakeInFlight = (async () => {
+			await this.agent.waitForIdle();
+			await this._agentEventQueue;
+			if (this._disposed || this._disposing) return;
+			const state = this._durableWait.claim();
+			if (!state) return;
+			const content = `Durable wait finished (${state.outcome}): ${state.reason}. Check the actual outcome before repeating any external action.`;
+			await this.promptAndWait(content, {
+				source: "extension",
+				expandPromptTemplates: false,
+				agentMessageId: `wait:${state.id}`,
+				customMessage: {
+					role: "custom",
+					customType: "durable_wait",
+					content,
+					display: true,
+					details: state,
+					timestamp: Date.now(),
+				},
+			});
+			this._durableWait.acknowledge(state.id);
+		})()
+			.catch((error) => this._durableWait.fail(error))
+			.finally(() => {
+				this._waitWakeInFlight = undefined;
+				if (this.waitState?.status === "ready" && !this.waitError) this._scheduleWaitWake();
+			});
+	}
 	private readonly _autonomousTokenCap?: number;
 	get executionBudget(): ExecutionBudget | undefined {
 		return this.agent.executionGovernor instanceof ExecutionBudget ? this.agent.executionGovernor : undefined;
@@ -1423,11 +1502,18 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
-
-		this._buildRuntime({
-			activeToolNames: this._initialActiveToolNames,
-			includeAllExtensionTools: true,
-		});
+		this._durableWait = new DurableWait(artifactDir ? join(artifactDir, "durable-wait.json") : undefined, () =>
+			this._scheduleWaitWake(),
+		);
+		try {
+			this._buildRuntime({
+				activeToolNames: this._initialActiveToolNames,
+				includeAllExtensionTools: true,
+			});
+		} catch (error) {
+			this._durableWait.dispose();
+			throw error;
+		}
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -2226,6 +2312,7 @@ export class AgentSession {
 	}
 
 	private _maybeResumeGoalContinuationAfterRlmWork(): void {
+		if (this._durableWait.paused) return;
 		if (!this._goalContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
@@ -2363,10 +2450,11 @@ export class AgentSession {
 	}
 
 	private _shouldStopBeforeTurn(): boolean {
-		return this._steeringStopPending;
+		return this._durableWait.paused || this._steeringStopPending;
 	}
 
 	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
+		if (this._durableWait.paused) return true;
 		if (this._stopGoalContinuationForTerminalMessage(context.message)) {
 			return true;
 		}
@@ -3486,6 +3574,7 @@ export class AgentSession {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
+		if (this._durableWait.paused) return [];
 		if (this.queuedActionCount > 0) {
 			return [];
 		}
@@ -4254,6 +4343,7 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		this._durableWait.dispose();
 		this._ownedExecutionBudget?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
@@ -4689,6 +4779,7 @@ export class AgentSession {
 
 	private _canStartSessionActionImmediately(): boolean {
 		return (
+			!this._durableWait.paused &&
 			!this.isStreaming &&
 			!this.isCompacting &&
 			!this.isRetrying &&
@@ -5026,6 +5117,11 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		if (this._durableWait.paused && options?.source !== "extension") {
+			throw new Error(
+				"Session has a durable wait. Inspect waitState and call cancelWait() explicitly to resume; an interrupted wake may need reconciliation.",
+			);
+		}
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -5875,6 +5971,7 @@ export class AgentSession {
 	}
 
 	private _scheduleSessionInputPump(): void {
+		if (this._durableWait.paused) return;
 		if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) return;
 		if (this._disposed || this._disposing || this._sessionInputPumpRequested || !this._hasSelectableSessionInput()) {
 			return;
@@ -5894,6 +5991,10 @@ export class AgentSession {
 		try {
 			while (!this._disposed && !this._disposing && this._hasSelectableSessionInput()) {
 				await this.agent.waitForIdle();
+				if (this._durableWait.paused) {
+					blocked = true;
+					return;
+				}
 				const preselected = this._actionStore
 					.activeActions()
 					.find((action) => action.lifecycle.state === "selected");
@@ -6095,7 +6196,7 @@ export class AgentSession {
 	}
 
 	private _isBusyForSessionInput(point: "preflight" | "pump"): boolean {
-		const externalBusy = this.isCompacting || this.isRetrying || this.isBashRunning;
+		const externalBusy = this._durableWait.paused || this.isCompacting || this.isRetrying || this.isBashRunning;
 		if (point === "pump") {
 			return (
 				externalBusy ||
@@ -9493,6 +9594,10 @@ export class AgentSession {
 
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
+			"wait.start": async (payload) => ({
+				wait: this.startWait(parseWaitCondition(payload.condition), String(payload.reason ?? "")),
+			}),
+			"wait.status": async () => ({ wait: this.waitState ?? null, error: this.waitError ?? null }),
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
 				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
 			})),
@@ -11189,6 +11294,16 @@ export class AgentSession {
 					run.settled = true;
 					run.settlement.resolve();
 					this._unsettledRlmChildRuns.delete(run);
+					const wait = this.waitState;
+					if (wait?.condition.kind === "child" && wait.condition.id === run.id) {
+						this.notifyWait(
+							wait.id,
+							"child",
+							run.id,
+							run.id,
+							run.status === "done" ? "completed" : run.status === "cancelled" ? "cancelled" : "failed",
+						);
+					}
 					this._maybeResumeGoalContinuationAfterRlmWork();
 				}
 			}

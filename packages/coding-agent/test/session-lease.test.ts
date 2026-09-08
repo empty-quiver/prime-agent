@@ -35,6 +35,17 @@ function enabledEnvironment(owner: string): NodeJS.ProcessEnv {
 }
 
 describe("session leases", () => {
+	it.each(["{broken", "{}", "null"])("does not reclaim corrupt owner metadata: %s", (metadata) => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(join(agentDir, "corrupt.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const directory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(join(directory, "owner.json"), metadata);
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow(
+			"Could not acquire session lease",
+		);
+	});
 	it("reads an invariant process start identity on Windows", () => {
 		const calls: Array<{ command: string; args: string[] }> = [];
 		const processStartId = getWindowsProcessStartId(42, (command, args) => {
