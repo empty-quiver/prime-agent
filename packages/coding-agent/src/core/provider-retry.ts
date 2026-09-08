@@ -1,4 +1,8 @@
-import { type AgentExecutionGovernor, createRequestDeadline } from "@earendil-works/pi-agent-core";
+import {
+	type AgentExecutionGovernor,
+	type AgentExecutionObserver,
+	createRequestDeadline,
+} from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { sleep } from "../utils/sleep.js";
 import { waitWithAbort } from "../utils/wait-with-abort.js";
@@ -10,6 +14,7 @@ import type { SettingsManager } from "./settings-manager.js";
  * consumers (side questions, compaction, refinement, session summaries).
  */
 export interface ProviderRetryPolicy {
+	observer?: AgentExecutionObserver;
 	execution?: { governor: AgentExecutionGovernor; model: Model<Api> };
 	enabled: boolean;
 	maxRetries: number;
@@ -22,8 +27,10 @@ export function providerRetryPolicy(
 	settingsManager: SettingsManager,
 	governor?: AgentExecutionGovernor,
 	model?: Model<Api>,
+	observer?: AgentExecutionObserver,
 ): ProviderRetryPolicy {
 	return {
+		observer,
 		...(governor && model ? { execution: { governor, model } } : {}),
 		...settingsManager.getRetrySettings(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
@@ -105,6 +112,7 @@ export async function completeWithProviderRetry(
 	const signal = signals.length > 0 ? AbortSignal.any(signals) : undefined;
 	for (;;) {
 		signal?.throwIfAborted();
+		await policy.observer?.beforeModel();
 		const reservation = await execution?.governor.beforeModel({ model: execution.model, context: { messages: [] } });
 		const deadline = createRequestDeadline(signal, options?.providerTimeoutMs);
 		let message: AssistantMessage;

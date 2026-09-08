@@ -22,6 +22,7 @@ import type {
 	Model,
 	ServiceTier,
 	TextContent,
+	ToolResultMessage,
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
@@ -194,6 +195,7 @@ import {
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import { OperationJournal, type OperationRecord } from "./operation-journal.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import {
@@ -1106,6 +1108,48 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 export class AgentSession {
 	private _ownedExecutionBudget?: ExecutionBudget;
 	private readonly _durableWait: DurableWait;
+	private readonly _operationJournal: OperationJournal;
+	get recoveryIssues(): OperationRecord[] {
+		return this._operationJournal.issues().filter((record) => record.status === "unknown");
+	}
+
+	reconcileOperation(id: string, outcome: "succeeded" | "failed", evidence: string): void {
+		const record = this.recoveryIssues.find((candidate) => candidate.id === id);
+		this._operationJournal.reconcile(id, outcome, evidence);
+		if (record) this._restoreOperationResult({ ...record, status: outcome, reconciliation: evidence });
+	}
+
+	private _restoreOperationResult(record: OperationRecord): void {
+		if (
+			!this.agent.state.messages.some(
+				(message) =>
+					message.role === "assistant" &&
+					message.content.some((part) => part.type === "toolCall" && part.id === record.toolCallId),
+			)
+		)
+			return;
+		if (
+			this.agent.state.messages.some(
+				(message) => message.role === "toolResult" && message.toolCallId === record.toolCallId,
+			)
+		)
+			return;
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: record.toolCallId,
+			toolName: record.name,
+			content: [
+				{
+					type: "text",
+					text: `Recovery journal: operation ${record.status}. Original output was not durably recorded. Inspect external state; do not replay this operation automatically.`,
+				},
+			],
+			isError: record.status !== "succeeded",
+			timestamp: Date.now(),
+		};
+		this.sessionManager.appendMessage(result);
+		this.agent.state.messages = [...this.agent.state.messages, result];
+	}
 	private _waitWakeInFlight?: Promise<void>;
 
 	get waitState(): DurableWaitState | undefined {
@@ -1144,6 +1188,8 @@ export class AgentSession {
 	}
 
 	resumeWait(): void {
+		if (this.recoveryIssues.length)
+			throw new Error("Reconcile interrupted operations before resuming a durable wait");
 		this._durableWait.resume();
 	}
 
@@ -1153,6 +1199,7 @@ export class AgentSession {
 			await this.agent.waitForIdle();
 			await this._agentEventQueue;
 			if (this._disposed || this._disposing) return;
+			await this._operationJournal.beforeModel();
 			const state = this._durableWait.claim();
 			if (!state) return;
 			const content = `Durable wait finished (${state.outcome}): ${state.reason}. Check the actual outcome before repeating any external action.`;
@@ -1506,6 +1553,24 @@ export class AgentSession {
 			this._scheduleWaitWake(),
 		);
 		try {
+			const answered = new Set(
+				this.agent.state.messages
+					.filter((message) => message.role === "toolResult")
+					.map((message) => message.toolCallId),
+			);
+			const unfinished = this.agent.state.messages.flatMap((message) =>
+				message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted"
+					? message.content.flatMap((part) =>
+							part.type === "toolCall" && !answered.has(part.id) ? [{ id: part.id, name: part.name }] : [],
+						)
+					: [],
+			);
+			this._operationJournal = new OperationJournal(
+				artifactDir ? join(artifactDir, "operations") : undefined,
+				unfinished,
+			);
+			this.agent.executionObserver = this._operationJournal;
+			for (const record of this._operationJournal.recoveredResults) this._restoreOperationResult(record);
 			this._buildRuntime({
 				activeToolNames: this._initialActiveToolNames,
 				includeAllExtensionTools: true,
@@ -4344,6 +4409,7 @@ export class AgentSession {
 		}
 		this._disposed = true;
 		this._durableWait.dispose();
+		this._operationJournal.dispose();
 		this._ownedExecutionBudget?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
@@ -7868,7 +7934,7 @@ export class AgentSession {
 					signal,
 					this.thinkingLevel,
 					summaryCall,
-					providerRetryPolicy(this.settingsManager, this.executionBudget, model),
+					providerRetryPolicy(this.settingsManager, this.executionBudget, model, this._operationJournal),
 				));
 			}
 
@@ -8388,7 +8454,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
-			providerRetryPolicy(this.settingsManager, this.executionBudget, model),
+			providerRetryPolicy(this.settingsManager, this.executionBudget, model, this._operationJournal),
 		);
 	}
 
@@ -8624,7 +8690,10 @@ export class AgentSession {
 			history,
 			model,
 			apiKey,
-			{ ...options, retry: providerRetryPolicy(this.settingsManager, this.executionBudget, model) },
+			{
+				...options,
+				retry: providerRetryPolicy(this.settingsManager, this.executionBudget, model, this._operationJournal),
+			},
 			headers,
 			signal,
 			this.thinkingLevel,
@@ -9703,7 +9772,15 @@ export class AgentSession {
 				async (payload: Record<string, unknown>) => {
 					await this.executionBudget?.beforeTool(randomUUID(), name);
 					this.executionBudget?.signal.throwIfAborted();
-					return handler(payload);
+					const receipt = await this._operationJournal.beforeTool(randomUUID(), name);
+					try {
+						const result = await handler(payload);
+						await receipt.settle("succeeded");
+						return result;
+					} catch (error) {
+						await receipt.settle(this.executionBudget?.signal.aborted ? "unknown" : "failed");
+						throw error;
+					}
 				},
 			]),
 		);
@@ -12084,7 +12161,7 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
-					retry: providerRetryPolicy(this.settingsManager, this.executionBudget, model),
+					retry: providerRetryPolicy(this.settingsManager, this.executionBudget, model, this._operationJournal),
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

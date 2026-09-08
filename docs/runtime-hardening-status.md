@@ -54,12 +54,20 @@ Mixed-version warning: an older executable does not understand the new attempt m
 - Reproduced and fixed a retry-sleep leak: 10,000 completed sleeps retained 10,000 abort listeners before the fix and zero afterward. Captured heap snapshots under four-way concurrent synthetic long transcripts; see [measurements and limitations](extension-timer-hardening.md).
 - These findings do not establish the historical OOM's root cause. Long-duration memory and controlled worker containment remain release gates.
 
+### Operation recovery (workstream 7)
+
+- Actual tool and kernel host requests persist intent before execution, then a known success/failure or unknown outcome. Arguments and credentials are not included in receipts. A returned failure does not mean partial external effects were rolled back.
+- Cancellation preserves unknown outcomes, including outstanding nested host requests. Late completion callbacks cannot erase an operator's reconciliation. On restart, unfinished intents and legacy unanswered tool calls block primary and auxiliary model admission.
+- SDK `recoveryIssues` exposes unknown operations. `reconcileOperation(id, outcome, evidence)` requires operator evidence and is not exposed as a model tool. Known completions missing transcript results receive a recovery notice instead of replay.
+- Coverage includes restart through the SDK, an abruptly exiting separate OS process, failed completion-receipt writes, legacy unfinished cells and late completion races.
+- Completed receipt files are retained on disk; long-session receipt retention/compaction remains a release gate. This journal does not provide exactly-once semantics for remote services or contain an escaped process.
+
 ## Remaining work
 
 1. **Budget integration release gates (workstream 2):** complete the remaining recovery, pre-publication, and ledger fault checks listed above; review provider request bounds and cancellation cleanup alongside workstreams 3 and 7.
 2. **Explicit waits (workstream 4):** persist typed deadline/job/child conditions and wake generations; end the parent turn without injecting immediate continuations; expose provider deadlines and classify cancellation, timeout, provider failure and worker crash. Retry only when outcome classification permits it.
 3. **Extension timers and memory release gates (workstream 6):** complete long-duration canary and Linux worker containment checks. Callback ownership and two bounded retention fixes are implemented; historical OOM attribution remains unknown.
-4. **Restart recovery (workstream 7):** durable session identity and one active lease owner; journal operation intent/outcome; reconcile unknown external effects; deduplicate Signal message IDs; use supported idempotency keys; progress-aware health checks; bounded restart backoff; pinned Python dependencies.
+4. **Restart integration (workstream 7):** deploy the durable session supervisor, wire wait activation after recovery, deduplicate Signal message IDs, use supported idempotency keys, add progress-aware health checks and bounded restart backoff, pin Python dependencies, and verify complete worker containment. Operation journaling and wait ownership are implemented but are not a deployed supervisor.
 5. **Release gate:** run isolated Linux/ARM64 fault tests, review all cross-worker boundaries, then a 24–48-hour copied-session canary with isolated credentials and external effects. No production deployment until these gates pass.
 
 ## Verification entry points

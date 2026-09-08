@@ -15,3 +15,13 @@ export interface AgentExecutionGovernor {
 	}): Promise<ModelExecutionReservation>;
 	beforeTool(toolCallId: string, toolName: string): Promise<void>;
 }
+
+export interface ToolExecutionReceipt {
+	settle(outcome: "succeeded" | "failed" | "unknown"): Promise<void>;
+}
+
+/** Durable operation intent and recovery gate, independent of budget accounting. */
+export interface AgentExecutionObserver {
+	beforeModel(): Promise<void>;
+	beforeTool(toolCallId: string, toolName: string): Promise<ToolExecutionReceipt>;
+}

@@ -12,7 +12,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
-import type { ModelExecutionReservation } from "./execution-governor.js";
+import type { ModelExecutionReservation, ToolExecutionReceipt } from "./execution-governor.js";
 import { PendingEvents } from "./pending-events.js";
 import { createRequestDeadline, ProviderTimeoutError } from "./request-deadline.js";
 import type {
@@ -493,6 +493,7 @@ async function streamAssistantResponse(
 	try {
 		throwIfAborted(signal);
 		let messages = context.messages;
+		await config.executionObserver?.beforeModel();
 		if (config.transformContext) {
 			messages = await maybePromiseWithAbort(config.transformContext(messages, signal), signal);
 		}
@@ -866,10 +867,13 @@ async function executePreparedToolCall(
 ): Promise<ExecutedToolCallOutcome> {
 	const updateEvents = new PendingEvents();
 	let acceptingUpdates = true;
+	let receipt: ToolExecutionReceipt | undefined;
 
 	try {
 		throwIfAborted(signal);
 		await config.executionGovernor?.beforeTool(prepared.toolCall.id, prepared.toolCall.name);
+		throwIfAborted(signal);
+		receipt = await config.executionObserver?.beforeTool(prepared.toolCall.id, prepared.toolCall.name);
 		throwIfAborted(signal);
 		const result = await raceWithAbort(
 			prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
@@ -889,6 +893,10 @@ async function executePreparedToolCall(
 			signal,
 		);
 		acceptingUpdates = false;
+		const details = result.details;
+		const status =
+			details !== null && typeof details === "object" && "status" in details ? details.status : undefined;
+		await receipt?.settle(status === "aborted" ? "unknown" : status === "error" ? "failed" : "succeeded");
 		try {
 			await raceWithAbort(updateEvents.settle(), signal);
 		} catch (error) {
@@ -899,6 +907,7 @@ async function executePreparedToolCall(
 		return { result, isError: false };
 	} catch (error) {
 		acceptingUpdates = false;
+		await receipt?.settle(signal?.aborted ? "unknown" : "failed");
 		await raceWithAbort(updateEvents.settle(), signal).catch(() => undefined);
 		return {
 			result: createErrorToolResult(

@@ -10,7 +10,7 @@ import {
 	type Transport,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
-import type { AgentExecutionGovernor } from "./execution-governor.js";
+import type { AgentExecutionGovernor, AgentExecutionObserver } from "./execution-governor.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -96,6 +96,7 @@ function createMutableAgentState(
 }
 
 export interface AgentOptions {
+	executionObserver?: AgentExecutionObserver;
 	providerTimeoutMs?: number;
 	executionGovernor?: AgentExecutionGovernor;
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
@@ -189,6 +190,7 @@ export class AgentContinueError extends Error {
 }
 
 export class Agent {
+	public executionObserver?: AgentExecutionObserver;
 	public providerTimeoutMs?: number;
 	public executionGovernor?: AgentExecutionGovernor;
 	private _state: MutableAgentState;
@@ -223,6 +225,7 @@ export class Agent {
 	public toolExecution: ToolExecutionMode;
 
 	constructor(options: AgentOptions = {}) {
+		this.executionObserver = options.executionObserver;
 		this.providerTimeoutMs = options.providerTimeoutMs;
 		this.executionGovernor = options.executionGovernor;
 		this._state = createMutableAgentState(options.initialState);
@@ -466,6 +469,7 @@ export class Agent {
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
+			executionObserver: this.executionObserver,
 			providerTimeoutMs: this.providerTimeoutMs,
 			executionGovernor: this.executionGovernor,
 			model: this._state.model,

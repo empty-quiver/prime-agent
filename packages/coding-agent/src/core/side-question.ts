@@ -86,6 +86,7 @@ export function startSideQuestion(
 	]);
 
 	const sideAgent = new Agent({
+		executionObserver: parent.executionObserver,
 		executionGovernor: parent.executionGovernor,
 		providerTimeoutMs: parent.providerTimeoutMs,
 		initialState: {

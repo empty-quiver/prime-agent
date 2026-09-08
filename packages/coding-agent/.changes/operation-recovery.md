@@ -1,0 +1,2 @@
+- Persisted tool and kernel host operation outcomes and blocked uncertain restart replay until operator reconciliation.
+- Restored notices for known completed operations whose transcript results were missing instead of rerunning their tools.

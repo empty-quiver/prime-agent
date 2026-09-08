@@ -1,0 +1,1 @@
+- Added host operation receipts before actual tool execution and a recovery gate before model requests.

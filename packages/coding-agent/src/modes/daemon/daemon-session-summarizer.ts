@@ -362,7 +362,12 @@ export class DaemonSessionSummarizer {
 				registry: session.modelRegistry,
 				messages: contextMessages,
 				isWorking,
-				retryPolicy: providerRetryPolicy(session.settingsManager),
+				retryPolicy: providerRetryPolicy(
+					session.settingsManager,
+					undefined,
+					undefined,
+					session.agent?.executionObserver,
+				),
 				signal: controller.signal,
 			});
 			if (generated) {
