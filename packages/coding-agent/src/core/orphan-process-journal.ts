@@ -82,7 +82,7 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 		}
 	}
 	// Pid-only actives (no processStartId) still surface from old journals or
-	// host writes whose start-id query failed; reapers decide per-platform.
+	// host writes whose start-id query failed; reapers must verify identity.
 	return [...latest.values()]
 		.filter(
 			(record) =>
@@ -100,17 +100,8 @@ export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boo
 	return orphan.processStartId !== undefined && getProcessStartId(orphan.pid) === orphan.processStartId;
 }
 
-/**
- * Identity-free records cannot prove the pid still names the journaled process.
- * On win32 the kernel's kill-on-close job already reaped its tree when it died,
- * so a bare-pid taskkill only risks killing a reused pid. POSIX keeps the
- * best-effort kill (group-scoped, and the spawn gate makes pid-only actives
- * host-written rarities there).
- */
+/** Identity-free records cannot prove the pid still names the journaled process. */
 export function shouldReapOrphanProcess(orphan: ActiveOrphanProcess): boolean {
-	if (orphan.processStartId === undefined) {
-		return process.platform !== "win32";
-	}
 	return isOrphanProcessIdentityCurrent(orphan);
 }
 

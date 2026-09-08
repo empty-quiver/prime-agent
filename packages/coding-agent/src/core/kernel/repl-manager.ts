@@ -48,6 +48,7 @@ import {
 	type RestoreResult,
 	type SnapshotResult,
 } from "./state-snapshot.js";
+import { terminateOwnedChild } from "./terminate-child.js";
 
 const REPL_PROTOCOL_VERSION = 3;
 const READY_TIMEOUT_MS = 30_000;
@@ -204,6 +205,7 @@ export class ReplKernelManager {
 	private pendingRestore = false;
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
+	private terminationPromise?: Promise<void>;
 
 	constructor(options: KernelManagerOptions) {
 		this.options = {
@@ -434,6 +436,8 @@ export class ReplKernelManager {
 		child.on("error", (err) => {
 			if (this.child !== child) return;
 			this.appendKernelDiagnostic(`spawn error: ${err.message}`);
+			// A failed signal is not proof of exit. The teardown owner quarantines this child.
+			if (this.gracefulShutdownGeneration === this.startGeneration) return;
 			this.state = "shutdown";
 			liveKernels.delete(this);
 			// Fail a pending start() promptly instead of letting it ride out the
@@ -998,7 +1002,17 @@ export class ReplKernelManager {
 				}
 				throw error instanceof Error ? error : new Error(String(error));
 			}
-			return await result.promise;
+			const response = await result.promise;
+			if (opts.terminateOnAbort && response.status === "aborted" && this.activeExecution === execution) {
+				response.error = {
+					ename: "KernelExecutionOutcomeUnknown",
+					evalue:
+						"Interrupted cell did not finish. Kernel terminated; external effects may have occurred. Reconcile before repeating this cell.",
+					traceback: [],
+				};
+				await this.terminate(false);
+			}
+			return response;
 		} finally {
 			clearAbortTimer();
 			opts.signal?.removeEventListener("abort", onAbort);
@@ -1274,7 +1288,7 @@ export class ReplKernelManager {
 			const pid = child.pid;
 			let signaled = false;
 			try {
-				signaled = child.kill(killSignal);
+				if (child.exitCode === null && child.signalCode === null) signaled = child.kill(killSignal);
 			} catch {
 				// The kernel has already exited.
 			}
@@ -1316,6 +1330,10 @@ export class ReplKernelManager {
 
 	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won; a joiner's options are ignored - the first caller's policy wins). */
 	async shutdown(opts: KernelShutdownOptions = {}): Promise<boolean> {
+		if (this.terminationPromise) {
+			await this.terminationPromise;
+			return false;
+		}
 		const inFlightShutdown = this.gracefulShutdownPromise;
 		if (inFlightShutdown) {
 			await inFlightShutdown;
@@ -1338,6 +1356,10 @@ export class ReplKernelManager {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			if (this.gracefulShutdownGeneration === this.startGeneration) return false;
+			if (this.child) {
+				await this.terminate(true);
+				return true;
+			}
 			this.cleanupResources();
 			return true;
 		}
@@ -1396,10 +1418,18 @@ export class ReplKernelManager {
 		} finally {
 			if (shutdownTimer) globalThis.clearTimeout(shutdownTimer);
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
-			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
-			if (!this.startStale(generation)) {
-				this.cleanupResources();
-				performedCleanup = true;
+			try {
+				if (!this.startStale(generation)) {
+					const child = this.child;
+					if (child) await terminateOwnedChild(child);
+					if (!this.startStale(generation) && this.child === child) {
+						if (child?.pid !== undefined) recordOrphanProcessState(child.pid, false);
+						this.cleanupResources();
+						performedCleanup = true;
+					}
+				}
+			} finally {
+				if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			}
 		}
 
@@ -1432,10 +1462,33 @@ export class ReplKernelManager {
 	}
 
 	async kill(): Promise<void> {
+		return this.terminate(true);
+	}
+
+	private async terminate(force: boolean): Promise<void> {
+		if (this.terminationPromise) return this.terminationPromise;
 		this.supersedeProtocolRepair();
 		this.state = "shutdown";
 		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
+		const child = this.child;
+		const generation = this.startGeneration;
+		this.gracefulShutdownGeneration = generation;
+		this.teardownInFlight++;
+		const operation = (async () => {
+			if (child) await terminateOwnedChild(child, { force });
+			if (this.child === child && !this.startStale(generation)) {
+				if (child?.pid !== undefined) recordOrphanProcessState(child.pid, false);
+				this.cleanupResources("SIGKILL");
+			}
+		})();
+		this.terminationPromise = operation;
+		try {
+			await operation;
+		} finally {
+			this.teardownInFlight--;
+			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
+			if (this.terminationPromise === operation) this.terminationPromise = undefined;
+		}
 	}
 
 	/**
@@ -1614,6 +1667,6 @@ export class ReplKernelManager {
 	}
 
 	get isDefunct(): boolean {
-		return this.state === "shutdown";
+		return this.state === "shutdown" && !this.child && !this.terminationPromise;
 	}
 }

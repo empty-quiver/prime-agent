@@ -314,11 +314,16 @@ export class IpythonKernelProvisioner {
 	private readonly disposeController = new AbortController();
 	/** Snapshot policy of the dispose that aborted a startup, honored by startKernel's failure teardown. */
 	private disposeSnapshot = true;
+	private killPromise?: Promise<void>;
+	private disposePromise?: Promise<void>;
 
 	constructor(
 		private readonly cwd: string,
 		private readonly options?: Omit<IpythonToolOptions, "provisioner">,
-	) {}
+	) {
+		// Observe a failed predecessor even when this lazy kernel is never started.
+		void options?.readyGate?.catch(() => undefined);
+	}
 
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
@@ -355,39 +360,51 @@ export class IpythonKernelProvisioner {
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */
 	async dispose(options?: { snapshot?: boolean }): Promise<void> {
+		if (this.disposePromise) return this.disposePromise;
 		this.disposeSnapshot = options?.snapshot ?? true;
 		// Drops a still-queued boot out of the semaphore and short-circuits an
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
 		this.disposeController.abort();
 		const pending = this.managerPromise;
-		this.managerPromise = undefined;
-		this.startedManager = undefined;
 		if (!pending) return;
-		try {
-			const m = await pending;
-			await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
-		} catch {
-			// a failed startup already cleaned up after itself
-		}
+		this.disposePromise = (async () => {
+			const m = await pending.catch(() => undefined);
+			if (m) await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
+			if (this.managerPromise === pending) {
+				this.managerPromise = undefined;
+				this.startedManager = undefined;
+			}
+		})();
+		return this.disposePromise;
 	}
 
 	async kill(): Promise<void> {
+		if (this.killPromise) return this.killPromise;
 		const pending = this.managerPromise;
-		this.managerPromise = undefined;
-		this.startedManager = undefined;
 		if (!pending) return;
+		const operation = (async () => {
+			const m = await pending.catch(() => undefined);
+			if (m) await m.kill();
+			if (this.managerPromise === pending) {
+				this.managerPromise = undefined;
+				this.startedManager = undefined;
+			}
+		})();
+		this.killPromise = operation;
 		try {
-			const m = await pending;
-			await m.kill();
-		} catch {
-			// a failed startup already cleaned up after itself
+			await operation;
+		} finally {
+			if (this.killPromise === operation) this.killPromise = undefined;
 		}
 	}
 
 	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
-		if (signal?.aborted) {
+		if (signal?.aborted || this.disposeController.signal.aborted) {
 			return Promise.reject(createAbortError());
+		}
+		if (this.killPromise) {
+			return raceWithAbort(this.killPromise, signal).then(() => this.ensure(onProgress, signal));
 		}
 		// Only a terminally dead kernel drops the memo; a repairing manager (idle/starting) recovers itself.
 		if (this.startedManager?.isDefunct) {
@@ -453,10 +470,7 @@ export class IpythonKernelProvisioner {
 		// no-gate path stays synchronous (callers rely on prompt startup progress).
 		try {
 			if (this.options?.readyGate) {
-				await raceWithAbort(
-					this.options.readyGate.catch(() => {}),
-					startupSignal,
-				);
+				await raceWithAbort(this.options.readyGate, startupSignal);
 			}
 			const snapshotDir = this.options?.snapshotDir;
 			// Always inject an absolute trusted shell (undefined only on win32
@@ -577,6 +591,7 @@ async function executeWithBusyKernelChoice(
 			return {
 				result: await m.execute(code, {
 					signal,
+					terminateOnAbort: !ctx?.hasUI,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
@@ -585,6 +600,12 @@ async function executeWithBusyKernelChoice(
 				kernelRestarted,
 			};
 		} catch (error) {
+			if (error instanceof KernelBusyAfterInterruptError && !ctx?.hasUI) {
+				await provisioner.kill();
+				throw new Error(
+					"Previous interrupted cell did not finish; kernel terminated. Its outcome is unknown. This cell was not executed; reconcile before retrying.",
+				);
+			}
 			if (!(error instanceof KernelBusyAfterInterruptError) || signal?.aborted) {
 				throw error;
 			}

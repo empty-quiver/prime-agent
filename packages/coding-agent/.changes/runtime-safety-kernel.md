@@ -1,0 +1,2 @@
+- Fixed headless cancellation to terminate unresponsive kernels, confirm process exit, and report uncertain cell outcomes without replaying them.
+- Fixed kernel replacement racing an unfinished kill or silently ignoring termination failures.

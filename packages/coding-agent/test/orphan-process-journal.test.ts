@@ -120,8 +120,7 @@ describe("orphan process journal", () => {
 		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
 	});
 
-	// POSIX behavior: CI runs Ubuntu, so this exercises the real kill path.
-	it("best-effort kills pid-only records in the kernel crash-reap path", async () => {
+	it("refuses to kill pid-only records even on POSIX", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
 		tempDirs.push(directory);
 		const path = join(directory, "orphans.jsonl");
@@ -145,11 +144,16 @@ describe("orphan process journal", () => {
 			})}\n`,
 		);
 
-		reapKernelOrphanProcesses(kernelPid);
-
 		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+		try {
+			expect(shouldReapOrphanProcess({ pid: childPid!, kernelPid })).toBe(false);
+			reapKernelOrphanProcesses(kernelPid);
+			expect(child.exitCode).toBeNull();
+			expect(child.signalCode).toBeNull();
+		} finally {
+			child.kill("SIGKILL");
+		}
 		await exited;
-		expect(child.signalCode).toBe("SIGKILL");
 	});
 
 	it("win32 reapers ignore identity-free records", async () => {

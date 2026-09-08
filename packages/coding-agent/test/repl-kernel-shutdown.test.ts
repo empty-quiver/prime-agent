@@ -42,9 +42,15 @@ function configuredManager(
 	});
 	const internals = manager as unknown as ShutdownInternals;
 	const child = Object.assign(new EventEmitter(), {
-		exitCode: null,
-		signalCode: null,
-		kill: vi.fn(() => true),
+		exitCode: null as number | null,
+		signalCode: null as NodeJS.Signals | null,
+		kill: vi.fn((signal: NodeJS.Signals | number = "SIGTERM") => {
+			if (typeof signal === "number") throw new Error("Test kernel requires a named signal");
+			if (child.exitCode !== null || child.signalCode !== null) return false;
+			child.signalCode = signal;
+			child.emit("exit", null, signal);
+			return true;
+		}),
 		pid: undefined,
 		stdin: { destroyed: false, destroy: vi.fn() },
 		stdout: { destroy: vi.fn(), on: vi.fn() },
@@ -283,6 +289,7 @@ describe("ReplKernelManager graceful shutdown", () => {
 		const alive = configuredManager(() => {});
 		const aliveChild = alive.internals.child;
 		await alive.manager.kill();
+		await new Promise<void>((resolve) => globalThis.setImmediate(resolve));
 		expect(aliveChild.stderr?.destroy).toHaveBeenCalledTimes(1);
 
 		// Exited child: the post-exit drain owns the stream; destroying it in

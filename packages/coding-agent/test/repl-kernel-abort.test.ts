@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
@@ -30,13 +31,23 @@ function runningManagerWith(writeLine: (request: Record<string, unknown>) => Pro
 	kernelKill: ReturnType<typeof vi.fn>;
 } {
 	const manager = new ReplKernelManager({ cwd: process.cwd() });
-	const kernelKill = vi.fn((_signal?: NodeJS.Signals | number) => true);
+	const child = Object.assign(new EventEmitter(), {
+		exitCode: null as number | null,
+		signalCode: null as NodeJS.Signals | null,
+		pid: undefined,
+		stdin: undefined,
+	});
+	const kernelKill = vi.fn((signal: NodeJS.Signals = "SIGTERM") => {
+		child.signalCode = signal;
+		child.emit("exit", null, signal);
+		return true;
+	});
 	const internals = manager as unknown as ReplInternals;
 	Object.assign(internals, {
 		state: "running",
 		writeLine,
 		start: async () => {},
-		child: { kill: kernelKill, pid: undefined, stdin: undefined },
+		child: Object.assign(child, { kill: kernelKill }),
 	});
 	return { manager, internals, kernelKill };
 }
@@ -556,22 +567,17 @@ describe("ReplKernelManager abort handling", () => {
 	});
 
 	it("dispose writes a protocol shutdown request before hard-killing the child", async () => {
+		vi.useFakeTimers();
 		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
-		const { manager, internals } = runningManagerWith(writeLine);
-		const killSignals: (NodeJS.Signals | number | undefined)[] = [];
-		internals.child = {
-			kill: (signal?: NodeJS.Signals | number) => {
-				killSignals.push(signal);
-				return true;
-			},
-			pid: undefined,
-			stdin: { destroyed: false, destroy: () => undefined },
-		};
+		const { manager, internals, kernelKill } = runningManagerWith(writeLine);
+		internals.child!.stdin = { destroyed: false, destroy: () => undefined };
 
-		await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		const shutdown = manager.shutdown({ snapshot: true, drainHostRequests: true });
+		await vi.advanceTimersByTimeAsync(5_000);
+		await shutdown;
 		const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
 		expect(types).toContain("shutdown");
-		expect(killSignals).toContain("SIGTERM");
+		expect(kernelKill).toHaveBeenCalledWith("SIGTERM");
 	});
 
 	it("drops stale between-cell background output on kernel teardown", async () => {
