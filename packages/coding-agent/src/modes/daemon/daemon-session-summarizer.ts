@@ -1,8 +1,13 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentExecutionGovernor, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../core/model-registry.js";
-import { completeWithProviderRetry, type ProviderRetryPolicy, providerRetryPolicy } from "../../core/provider-retry.js";
+import {
+	completeWithProviderRetry,
+	DEFAULT_PROVIDER_RETRY_POLICY,
+	type ProviderRetryPolicy,
+	providerRetryPolicy,
+} from "../../core/provider-retry.js";
 import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
@@ -146,6 +151,7 @@ export function parseAgentStatusResponse(text: string, isWorking: boolean): Agen
 }
 
 export interface GenerateAgentStatusParams {
+	executionGovernor?: AgentExecutionGovernor;
 	registry: ModelRegistry;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
@@ -170,7 +176,7 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 	try {
 		// One failed attempt would settle an idle session to a stale needs_input verdict.
 		const response = await completeWithProviderRetry(
-			() =>
+			(requestSignal) =>
 				completeSimple(
 					model,
 					{
@@ -183,9 +189,17 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 							},
 						],
 					},
-					{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+					{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal: requestSignal },
 				),
-			{ policy: retryPolicy, signal },
+			{
+				policy: params.executionGovernor
+					? {
+							...(retryPolicy ?? DEFAULT_PROVIDER_RETRY_POLICY),
+							execution: { governor: params.executionGovernor, model },
+						}
+					: retryPolicy,
+				signal,
+			},
 		);
 		if (response.stopReason === "error") {
 			return undefined;
@@ -344,6 +358,7 @@ export class DaemonSessionSummarizer {
 		this.inFlight.set(id, controller);
 		try {
 			const generated = await this.generate({
+				executionGovernor: session.executionBudget,
 				registry: session.modelRegistry,
 				messages: contextMessages,
 				isWorking,

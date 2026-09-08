@@ -86,6 +86,8 @@ export function startSideQuestion(
 	]);
 
 	const sideAgent = new Agent({
+		executionGovernor: parent.executionGovernor,
+		providerTimeoutMs: parent.providerTimeoutMs,
 		initialState: {
 			model,
 			systemPrompt: parent.state.systemPrompt,
@@ -139,22 +141,33 @@ export function startSideQuestion(
 			// Standalone side agents bypass the session auto-retry loop; retry here instead.
 			let promptedOnce = false;
 			await completeWithProviderRetry(
-				async () => {
-					if (promptedOnce) {
-						// Session-loop recovery: drop the failed assistant turn and re-run.
-						sideAgent.state.messages = sideAgent.state.messages.slice(0, -1);
-						await sideAgent.continue();
-					} else {
-						promptedOnce = true;
-						await sideAgent.prompt(prompt);
+				async (requestSignal) => {
+					const cancel = () => sideAgent.abort();
+					requestSignal?.addEventListener("abort", cancel, { once: true });
+					try {
+						requestSignal?.throwIfAborted();
+						if (promptedOnce) {
+							// Session-loop recovery: drop the failed assistant turn and re-run.
+							sideAgent.state.messages = sideAgent.state.messages.slice(0, -1);
+							await sideAgent.continue();
+						} else {
+							promptedOnce = true;
+							await sideAgent.prompt(prompt);
+						}
+						const last = sideAgent.state.messages.at(-1);
+						if (last?.role !== "assistant") {
+							throw new Error(sideAgent.state.errorMessage || "Side question produced no assistant message");
+						}
+						return last as AssistantMessage;
+					} finally {
+						requestSignal?.removeEventListener("abort", cancel);
 					}
-					const last = sideAgent.state.messages.at(-1);
-					if (last?.role !== "assistant") {
-						throw new Error(sideAgent.state.errorMessage || "Side question produced no assistant message");
-					}
-					return last as AssistantMessage;
 				},
-				{ policy: retry, signal: retryAbortController.signal },
+				{
+					policy: { ...retry, execution: undefined },
+					signal: retryAbortController.signal,
+					providerTimeoutMs: parent.providerTimeoutMs,
+				},
 			);
 			if (abortRequested) {
 				await emit("cancelled");

@@ -554,11 +554,11 @@ export async function generateSummary(
 			: { maxTokens, signal, apiKey, headers };
 
 	const response = await completeWithProviderRetry(
-		() =>
+		(requestSignal) =>
 			completeSimple(
 				model,
 				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-				completionOptions,
+				{ ...completionOptions, signal: requestSignal },
 			),
 		{ policy: retry, signal },
 	);
@@ -815,13 +815,13 @@ async function generateTurnPrefixSummary(
 	];
 
 	const response = await completeWithProviderRetry(
-		() =>
+		(requestSignal) =>
 			completeSimple(
 				model,
 				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 				model.reasoning && thinkingLevel && thinkingLevel !== "off"
-					? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-					: { maxTokens, signal, apiKey, headers },
+					? { maxTokens, signal: requestSignal, apiKey, headers, reasoning: thinkingLevel }
+					: { maxTokens, signal: requestSignal, apiKey, headers },
 			),
 		{ policy: retry, signal },
 	);

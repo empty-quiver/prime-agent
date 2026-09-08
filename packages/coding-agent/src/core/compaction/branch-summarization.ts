@@ -292,11 +292,11 @@ export async function generateBranchSummary(
 		},
 	];
 	const response = await completeWithProviderRetry(
-		() =>
+		(requestSignal) =>
 			completeSimple(
 				model,
 				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-				{ apiKey, headers, signal, maxTokens: 2048 },
+				{ apiKey, headers, signal: requestSignal, maxTokens: 2048 },
 			),
 		{ policy: retry, signal },
 	);

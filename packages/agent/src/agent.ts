@@ -96,6 +96,7 @@ function createMutableAgentState(
 }
 
 export interface AgentOptions {
+	providerTimeoutMs?: number;
 	executionGovernor?: AgentExecutionGovernor;
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -188,6 +189,7 @@ export class AgentContinueError extends Error {
 }
 
 export class Agent {
+	public providerTimeoutMs?: number;
 	public executionGovernor?: AgentExecutionGovernor;
 	private _state: MutableAgentState;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
@@ -221,6 +223,7 @@ export class Agent {
 	public toolExecution: ToolExecutionMode;
 
 	constructor(options: AgentOptions = {}) {
+		this.providerTimeoutMs = options.providerTimeoutMs;
 		this.executionGovernor = options.executionGovernor;
 		this._state = createMutableAgentState(options.initialState);
 		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
@@ -463,6 +466,7 @@ export class Agent {
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
+			providerTimeoutMs: this.providerTimeoutMs,
 			executionGovernor: this.executionGovernor,
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel,

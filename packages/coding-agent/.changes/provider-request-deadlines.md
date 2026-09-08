@@ -1,0 +1,2 @@
+- Bounded auxiliary provider waits, prevented automatic retries of timed-out requests, and stopped reporting failed child responses as successful completion.
+- Included side questions and daemon status summaries in host execution accounting.

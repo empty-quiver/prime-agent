@@ -117,6 +117,8 @@ export interface ShouldStopAfterTurnContext {
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Host request deadline including credential lookup and streaming; defaults to five minutes. */
+	providerTimeoutMs?: number;
 	executionGovernor?: AgentExecutionGovernor;
 	model: Model<any>;
 

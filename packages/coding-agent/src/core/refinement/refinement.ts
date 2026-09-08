@@ -911,14 +911,14 @@ export async function planRefinement(
 	// thinking level so the model uses its output budget for the JSON object.
 	void thinkingLevel;
 	const response = await completeWithProviderRetry(
-		() =>
+		(requestSignal) =>
 			completeSimple(
 				model,
 				{
 					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+				{ maxTokens: refinementMaxOutputTokens(model), signal: requestSignal, apiKey, headers },
 			),
 		{ policy: options.retry, signal },
 	);
@@ -982,14 +982,14 @@ ${conversationText}
 	// reasoning-capable models use final text budget for the JSON object.
 	void thinkingLevel;
 	const response = await completeWithProviderRetry(
-		() =>
+		(requestSignal) =>
 			completeSimple(
 				model,
 				{
 					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+				{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal: requestSignal, apiKey, headers },
 			),
 		{ policy: retry, signal },
 	);

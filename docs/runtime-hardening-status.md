@@ -8,7 +8,7 @@ This is a development branch, not a production-readiness claim. No supervisor de
 
 - Agent-core admits model requests and actual tool execution inside the loop, before dispatch. Failed attempts count; a two-turn endless-tool provider cannot obtain a third request.
 - `ExecutionBudget` serializes durable reservations across processes, reconciles successful usage before listeners can attribute child usage, and retains unknown reservations. Restarting with higher requested limits does not replace the saved account or exhaustion.
-- Inline children share the account; hosted children inherit it at publication and persist a relative account reference for recovery. Compaction, refinement, branch-summary retries, kernel host requests, and autonomous quality gates also use admission.
+- Inline children share the account; hosted children inherit it at publication and persist a relative account reference for recovery. Compaction, refinement, branch-summary retries, side questions, daemon status summaries, kernel host requests, and autonomous quality gates also use admission.
 - Deadlines abort model/tool work and auxiliary operations. Host waits remain bounded even when a provider ignores cancellation.
 - SDK `executionBudgetLimits` configures independent model-request, tool-call, token, cost, and elapsed limits. Explicit autonomous `maxTokens` is a strict reservation cap. The pre-existing **default** 80,000-token continuation target remains a soft target; it is not advertised as a hard cap.
 - Strict token admission conservatively reserves the model's full accepted context plus output ceiling. A cap smaller than this allowance refuses admission. Cost caps require an explicit host-supplied worst-case per-request charge; catalog prices alone are not a guaranteed billing bound. Provider violations exhaust the account and are reported, not concealed.
@@ -24,6 +24,14 @@ Still to verify: complete daemon recovery and pre-publication extension paths, c
 - Interactive interruption retains its wait/preserve-state choice. Restarting after a busy-before-execution rejection submits the *new* cell, not the interrupted cell.
 
 Remaining boundary: arbitrary detached subprocess trees and already-running host-side requests are not proven contained. Full descendant exit confirmation and worker/cgroup containment still need integration tests. Synchronous process-exit cleanup remains best effort.
+
+### Provider waits and child failure reporting (workstream 4)
+
+- Main provider requests have a five-minute host deadline covering context preparation, credentials and streaming. Agent SDK callers can set a finite `providerTimeoutMs`. This is separate from the execution budget and does not time-limit tools.
+- Auxiliary requests also have host deadlines and pass cancellation to built-in consumers. A provider that ignores cancellation cannot hold the host wait indefinitely; the host cannot prove its remote request stopped.
+- Timeout diagnostics classify the remote outcome and expenditure as unknown and prohibit automatic retry. Reservations remain held. Explicit caller cancellation remains distinct.
+- Failed child assistant messages no longer become successful child completions merely because the prompt promise resolved.
+- Durable deadline/job/child waits and structured worker-crash recovery remain in progress. No daemon wire shape or capability changed in this slice; diagnostics use the existing extensible diagnostic envelope.
 
 ### OAuth refresh isolation (workstream 5)
 

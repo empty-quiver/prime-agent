@@ -11037,6 +11037,14 @@ export class AgentSession {
 				});
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
+				const terminal = child._findLastAssistantInMessages(child.agent.state.messages);
+				if (terminal?.stopReason === "error" || terminal?.stopReason === "aborted") {
+					const kind =
+						terminal.stopReason === "aborted"
+							? "cancelled"
+							: (providerStreamFailureKind(terminal) ?? "provider_failure");
+					throw new Error(`${kind}: ${terminal.errorMessage ?? "Child did not complete successfully"}`);
+				}
 				run.status = "done";
 				// Only successful completions return; the edge lands on the parent's next commit.
 				const childLastCommitted = child.semanticEdges.lastCommittedRequestId;

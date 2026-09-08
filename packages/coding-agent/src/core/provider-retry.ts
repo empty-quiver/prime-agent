@@ -1,4 +1,4 @@
-import type { AgentExecutionGovernor } from "@earendil-works/pi-agent-core";
+import { type AgentExecutionGovernor, createRequestDeadline } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { sleep } from "../utils/sleep.js";
 import { waitWithAbort } from "../utils/wait-with-abort.js";
@@ -61,7 +61,7 @@ export function providerStreamFailureRetryAfterMs(message: AssistantMessage): nu
 
 /** Deterministic rejections never retry; auth gets one retry before it can be marked stale. */
 export function isPermanentProviderFailureKind(kind: string | undefined, retriesPerformed: number): boolean {
-	if (kind === "invalid_request" || kind === "refusal" || kind === "permission") {
+	if (kind === "timeout" || kind === "invalid_request" || kind === "refusal" || kind === "permission") {
 		return true;
 	}
 	return retriesPerformed > 0 && kind === "auth";
@@ -92,8 +92,8 @@ export function providerRetryDelay(
  * AgentSession auto-retry loop (provider SDKs never retry internally).
  */
 export async function completeWithProviderRetry(
-	attemptCompletion: () => Promise<AssistantMessage>,
-	options?: { policy?: ProviderRetryPolicy; signal?: AbortSignal },
+	attemptCompletion: (signal?: AbortSignal) => Promise<AssistantMessage>,
+	options?: { policy?: ProviderRetryPolicy; signal?: AbortSignal; providerTimeoutMs?: number },
 ): Promise<AssistantMessage> {
 	const policy = options?.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
 	const maxRetries = policy.enabled ? policy.maxRetries : 0;
@@ -106,14 +106,17 @@ export async function completeWithProviderRetry(
 	for (;;) {
 		signal?.throwIfAborted();
 		const reservation = await execution?.governor.beforeModel({ model: execution.model, context: { messages: [] } });
+		const deadline = createRequestDeadline(signal, options?.providerTimeoutMs);
 		let message: AssistantMessage;
 		try {
 			signal?.throwIfAborted();
-			message = await waitWithAbort(attemptCompletion(), signal);
+			message = await waitWithAbort(attemptCompletion(deadline.signal), deadline.signal);
 			await reservation?.settle(message);
 		} catch (error) {
 			await reservation?.settle();
 			throw error;
+		} finally {
+			deadline.dispose();
 		}
 		if (message.stopReason !== "error") {
 			return message;

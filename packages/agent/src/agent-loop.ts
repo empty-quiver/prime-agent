@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelExecutionReservation } from "./execution-governor.js";
 import { PendingEvents } from "./pending-events.js";
+import { createRequestDeadline, ProviderTimeoutError } from "./request-deadline.js";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -460,11 +461,25 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
+	const deadline = createRequestDeadline(signal, config.providerTimeoutMs);
+	signal = deadline.signal;
 	let partialMessage: AssistantMessage | null = null;
 	let reservation: ModelExecutionReservation | undefined;
 	let addedPartial = false;
 	const finishAbortedMessage = async () => {
 		const finalMessage = createAbortedAssistantMessage(config, partialMessage);
+		if (signal.reason instanceof ProviderTimeoutError) {
+			finalMessage.stopReason = "error";
+			finalMessage.errorMessage = signal.reason.message;
+			finalMessage.diagnostics = [
+				{
+					type: "provider_stream_failure",
+					timestamp: Date.now(),
+					error: { name: signal.reason.name, message: signal.reason.message },
+					details: { kind: "timeout", retrySafe: false, outcome: "unknown" },
+				},
+			];
+		}
 		if (addedPartial) {
 			context.messages[context.messages.length - 1] = finalMessage;
 		} else {
@@ -596,6 +611,8 @@ async function streamAssistantResponse(
 			return finishAbortedMessage();
 		}
 		throw error;
+	} finally {
+		deadline.dispose();
 	}
 }
 
