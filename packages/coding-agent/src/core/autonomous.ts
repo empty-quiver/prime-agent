@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
+import type { AgentExecutionGovernor } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage, UserMessage } from "@earendil-works/pi-ai";
 import { waitForChildProcess } from "../utils/child-process.js";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../utils/shell.js";
@@ -97,6 +98,7 @@ interface GitWorktreeSnapshot {
 }
 
 interface AutonomousOperationOptions {
+	executionGovernor?: AgentExecutionGovernor;
 	cwd?: string;
 	signal?: AbortSignal;
 }
@@ -278,13 +280,19 @@ export async function refreshAutonomousQualityGates(
 	if (!state.enabled || state.gates.commands.length === 0) {
 		return undefined;
 	}
-	return await runAutonomousQualityGates(state, options.cwd, options.signal);
+	const signal = options.executionGovernor
+		? options.signal
+			? AbortSignal.any([options.signal, options.executionGovernor.signal])
+			: options.executionGovernor.signal
+		: options.signal;
+	return await runAutonomousQualityGates(state, options.cwd, signal, options.executionGovernor);
 }
 
 async function runAutonomousQualityGates(
 	state: AutonomousRuntimeState,
 	cwd: string | undefined,
 	signal: AbortSignal | undefined,
+	governor?: AgentExecutionGovernor,
 ): Promise<AutonomousGateResult> {
 	signal?.throwIfAborted();
 	if (!cwd) {
@@ -309,6 +317,8 @@ async function runAutonomousQualityGates(
 			};
 			return attempt > state.gates.maxRetries ? "retry_exhausted" : "failed";
 		}
+		await governor?.beforeTool(`gate:${command}`, "autonomous_quality_gate");
+		signal?.throwIfAborted();
 		const result = await runChildProcess(command, [], {
 			cwd,
 			shell: true,

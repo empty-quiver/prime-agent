@@ -10,6 +10,7 @@ import {
 	type Transport,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import type { AgentExecutionGovernor } from "./execution-governor.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -95,6 +96,7 @@ function createMutableAgentState(
 }
 
 export interface AgentOptions {
+	executionGovernor?: AgentExecutionGovernor;
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -186,6 +188,7 @@ export class AgentContinueError extends Error {
 }
 
 export class Agent {
+	public executionGovernor?: AgentExecutionGovernor;
 	private _state: MutableAgentState;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
@@ -218,6 +221,7 @@ export class Agent {
 	public toolExecution: ToolExecutionMode;
 
 	constructor(options: AgentOptions = {}) {
+		this.executionGovernor = options.executionGovernor;
 		this._state = createMutableAgentState(options.initialState);
 		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
 		this.transformContext = options.transformContext;
@@ -459,6 +463,7 @@ export class Agent {
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
+			executionGovernor: this.executionGovernor,
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
@@ -494,6 +499,10 @@ export class Agent {
 		}
 
 		const abortController = new AbortController();
+		const governorSignal = this.executionGovernor?.signal;
+		const abortFromGovernor = () => abortController.abort(governorSignal?.reason);
+		governorSignal?.addEventListener("abort", abortFromGovernor, { once: true });
+		if (governorSignal?.aborted) abortFromGovernor();
 		let resolvePromise = () => {};
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
@@ -509,6 +518,7 @@ export class Agent {
 		} catch (error) {
 			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
+			governorSignal?.removeEventListener("abort", abortFromGovernor);
 			this.finishRun();
 		}
 	}

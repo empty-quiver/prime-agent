@@ -1,5 +1,7 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentExecutionGovernor } from "@earendil-works/pi-agent-core";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { sleep } from "../utils/sleep.js";
+import { waitWithAbort } from "../utils/wait-with-abort.js";
 import type { SettingsManager } from "./settings-manager.js";
 
 /**
@@ -8,6 +10,7 @@ import type { SettingsManager } from "./settings-manager.js";
  * consumers (side questions, compaction, refinement, session summaries).
  */
 export interface ProviderRetryPolicy {
+	execution?: { governor: AgentExecutionGovernor; model: Model<Api> };
 	enabled: boolean;
 	maxRetries: number;
 	baseDelayMs: number;
@@ -15,8 +18,13 @@ export interface ProviderRetryPolicy {
 	maxRetryDelayMs: number;
 }
 
-export function providerRetryPolicy(settingsManager: SettingsManager): ProviderRetryPolicy {
+export function providerRetryPolicy(
+	settingsManager: SettingsManager,
+	governor?: AgentExecutionGovernor,
+	model?: Model<Api>,
+): ProviderRetryPolicy {
 	return {
+		...(governor && model ? { execution: { governor, model } } : {}),
 		...settingsManager.getRetrySettings(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	};
@@ -90,12 +98,27 @@ export async function completeWithProviderRetry(
 	const policy = options?.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
 	const maxRetries = policy.enabled ? policy.maxRetries : 0;
 	let retriesPerformed = 0;
+	const execution = policy.execution;
+	const signals = [options?.signal, execution?.governor.signal].filter(
+		(signal): signal is AbortSignal => signal !== undefined,
+	);
+	const signal = signals.length > 0 ? AbortSignal.any(signals) : undefined;
 	for (;;) {
-		const message = await attemptCompletion();
+		signal?.throwIfAborted();
+		const reservation = await execution?.governor.beforeModel({ model: execution.model, context: { messages: [] } });
+		let message: AssistantMessage;
+		try {
+			signal?.throwIfAborted();
+			message = await waitWithAbort(attemptCompletion(), signal);
+			await reservation?.settle(message);
+		} catch (error) {
+			await reservation?.settle();
+			throw error;
+		}
 		if (message.stopReason !== "error") {
 			return message;
 		}
-		if (options?.signal?.aborted) {
+		if (signal?.aborted) {
 			// A cancel that raced the failure is an abort, not a provider failure.
 			return { ...message, stopReason: "aborted" };
 		}
@@ -111,7 +134,7 @@ export async function completeWithProviderRetry(
 			return message;
 		}
 		try {
-			await sleep(delay.delayMs, options?.signal);
+			await sleep(delay.delayMs, signal);
 		} catch {
 			return { ...message, stopReason: "aborted" };
 		}

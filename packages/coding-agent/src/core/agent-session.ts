@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
 	Agent,
 	type AgentContext,
@@ -35,6 +35,7 @@ import {
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
 import {
@@ -114,6 +115,7 @@ import {
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
+import { ExecutionBudget, type ExecutionBudgetLimits } from "./execution-budget.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
 import {
@@ -475,6 +477,9 @@ export interface AgentSessionConfig {
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	autonomous?: AgentAutonomousConfig;
+	executionBudget?: ExecutionBudget;
+	executionBudgetLimits?: ExecutionBudgetLimits;
+	executionBudgetPath?: string;
 	prewarmIpythonKernel?: boolean;
 	autoRefineReviewer?: AutoRefineReviewer;
 	/**
@@ -1092,6 +1097,11 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 }
 
 export class AgentSession {
+	private _ownedExecutionBudget?: ExecutionBudget;
+	private readonly _autonomousTokenCap?: number;
+	get executionBudget(): ExecutionBudget | undefined {
+		return this.agent.executionGovernor instanceof ExecutionBudget ? this.agent.executionGovernor : undefined;
+	}
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
@@ -1353,6 +1363,45 @@ export class AgentSession {
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
 		});
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		const referencePath = artifactDir ? join(artifactDir, "execution-budget-reference.json") : undefined;
+		let inheritedBudgetPath: string | undefined;
+		if (referencePath && existsSync(referencePath)) {
+			const reference: unknown = JSON.parse(readFileSync(referencePath, "utf8"));
+			if (typeof reference !== "string" || !reference) throw new Error("Invalid execution budget reference");
+			inheritedBudgetPath = resolve(artifactDir!, reference);
+			if (!existsSync(inheritedBudgetPath))
+				throw new Error("Shared execution budget is missing; refusing a fresh allowance");
+		}
+		const budgetPath =
+			inheritedBudgetPath ??
+			config.executionBudgetPath ??
+			(artifactDir ? join(artifactDir, "execution-budget.json") : undefined);
+		const autonomousLimits = this._autonomousState.limits;
+		this._autonomousTokenCap = config.autonomous?.maxTokens;
+		const executionBudget =
+			config.executionBudget ??
+			(config.executionBudgetLimits || this._autonomousState.enabled || (budgetPath && existsSync(budgetPath))
+				? new ExecutionBudget(
+						config.executionBudgetLimits ?? {
+							maxModelRequests: config.autonomous?.maxTurns ?? autonomousLimits.maxTurns,
+							...(config.autonomous?.maxTokens !== undefined ? { maxTokens: config.autonomous.maxTokens } : {}),
+							timeoutMs: config.autonomous?.timeoutMs ?? autonomousLimits.timeoutMs,
+						},
+						budgetPath,
+					)
+				: undefined);
+		if (executionBudget) this.agent.executionGovernor = executionBudget;
+		if (config.executionBudget?.path && referencePath) {
+			mkdirSync(artifactDir!, { recursive: true });
+			writeFileAtomicSync(referencePath, JSON.stringify(relative(artifactDir!, config.executionBudget.path)), {
+				mode: 0o600,
+				fsync: true,
+				fsyncDir: true,
+			});
+		}
+		if (config.executionBudget === undefined) this._ownedExecutionBudget = executionBudget;
+		this._bindExecutionBudgetCancellation();
 		this._goalState = this._loadPersistedGoalState();
 		// Seed initial goal from CLI --goal flag, but only for top-level sessions
 		// and only when the branch contains only bootstrap entry types (model_change,
@@ -2096,6 +2145,20 @@ export class AgentSession {
 			return false;
 		}
 		if (command.kind === "on") {
+			if (!this.executionBudget) {
+				const artifactDir = this.sessionManager.getSessionArtifactDir();
+				this._ownedExecutionBudget = new ExecutionBudget(
+					{
+						maxModelRequests: this._autonomousState.limits.maxTurns,
+						timeoutMs: this._autonomousState.limits.timeoutMs,
+						...(this._autonomousTokenCap !== undefined ? { maxTokens: this._autonomousTokenCap } : {}),
+					},
+					artifactDir ? join(artifactDir, "execution-budget.json") : undefined,
+				);
+				this.agent.executionGovernor = this._ownedExecutionBudget;
+				this._bindExecutionBudgetCancellation();
+			}
+			await this.executionBudget!.snapshot();
 			setAutonomousEnabled(this._autonomousState, true, { cwd: this._cwd });
 		} else if (command.kind === "off") {
 			setAutonomousEnabled(this._autonomousState, false);
@@ -2885,6 +2948,7 @@ export class AgentSession {
 		const snapshot = this._snapshotAutonomousRuntimeState();
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const autonomousMessage = await nextAutonomousContinuation(this._autonomousState, message, {
+			executionGovernor: this.executionBudget,
 			cwd: this._cwd,
 			signal: this.agent.signal,
 		});
@@ -3445,6 +3509,7 @@ export class AgentSession {
 		}
 		const autonomousSnapshot = this._snapshotAutonomousRuntimeState();
 		const autonomousMessage = await nextAutonomousContinuation(this._autonomousState, context.message, {
+			executionGovernor: this.executionBudget,
 			cwd: this._cwd,
 			signal,
 		});
@@ -4193,6 +4258,7 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		this._ownedExecutionBudget?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -4389,7 +4455,25 @@ export class AgentSession {
 	}
 
 	getAutonomousStatus(): AgentAutonomousStatus {
-		return autonomousStatus(this._autonomousState);
+		const status = autonomousStatus(this._autonomousState);
+		const budget = this.executionBudget?.cachedState;
+		return budget ? { ...status, turnsUsed: budget.modelRequests, startedAt: budget.startedAt } : status;
+	}
+
+	private _bindExecutionBudgetCancellation(): void {
+		const signal = this.executionBudget?.signal;
+		if (!signal) return;
+		const cancel = () => {
+			this.agent.abort();
+			this.abortRetry();
+			this.abortCompaction();
+			this.abortBranchSummary();
+			this._autoRefineReviewAbort?.abort();
+			this._refineAbortController?.abort();
+			this._cancelActiveRlmChildRuns("Host execution budget exhausted");
+		};
+		signal.addEventListener("abort", cancel, { once: true });
+		this.registerDisposeCallback(() => signal.removeEventListener("abort", cancel));
 	}
 
 	recordHostAutonomousContinuation(): void {
@@ -4398,6 +4482,7 @@ export class AgentSession {
 
 	async refreshAutonomousGates(): Promise<void> {
 		await refreshAutonomousQualityGates(this._autonomousState, {
+			executionGovernor: this.executionBudget,
 			cwd: this._cwd,
 		});
 	}
@@ -7686,7 +7771,7 @@ export class AgentSession {
 					signal,
 					this.thinkingLevel,
 					summaryCall,
-					providerRetryPolicy(this.settingsManager),
+					providerRetryPolicy(this.settingsManager, this.executionBudget, model),
 				));
 			}
 
@@ -8206,7 +8291,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
-			providerRetryPolicy(this.settingsManager),
+			providerRetryPolicy(this.settingsManager, this.executionBudget, model),
 		);
 	}
 
@@ -8442,7 +8527,7 @@ export class AgentSession {
 			history,
 			model,
 			apiKey,
-			{ ...options, retry: providerRetryPolicy(this.settingsManager) },
+			{ ...options, retry: providerRetryPolicy(this.settingsManager, this.executionBudget, model) },
 			headers,
 			signal,
 			this.thinkingLevel,
@@ -9505,7 +9590,16 @@ export class AgentSession {
 		if (this._mcpManager) {
 			Object.assign(handlers, this._mcpManager.hostHandlers());
 		}
-		return handlers;
+		return Object.fromEntries(
+			Object.entries(handlers).map(([name, handler]) => [
+				name,
+				async (payload: Record<string, unknown>) => {
+					await this.executionBudget?.beforeTool(randomUUID(), name);
+					this.executionBudget?.signal.throwIfAborted();
+					return handler(payload);
+				},
+			]),
+		);
 	}
 
 	async reload(): Promise<void> {
@@ -9729,6 +9823,7 @@ export class AgentSession {
 
 		const child = new AgentSession({
 			agent: childAgent,
+			executionBudget: this.executionBudget,
 			sessionManager: childSessionManager,
 			settingsManager: this.settingsManager,
 			cwd: this._cwd,
@@ -10761,6 +10856,21 @@ export class AgentSession {
 		emitChildUpdate();
 
 		const publishChildSession = (child: AgentSession) => {
+			if (this.executionBudget && child.executionBudget !== this.executionBudget) {
+				const childArtifactDir = child.sessionManager.getSessionArtifactDir();
+				if (childArtifactDir && this.executionBudget.path) {
+					mkdirSync(childArtifactDir, { recursive: true });
+					writeFileAtomicSync(
+						join(childArtifactDir, "execution-budget-reference.json"),
+						JSON.stringify(relative(childArtifactDir, this.executionBudget.path)),
+						{ mode: 0o600, fsync: true, fsyncDir: true },
+					);
+				}
+				child._ownedExecutionBudget?.dispose();
+				child._ownedExecutionBudget = undefined;
+				child.agent.executionGovernor = this.executionBudget;
+				child._bindExecutionBudgetCancellation();
+			}
 			childSession = child;
 			if (this._activeRlmChildRuns.get(run.id) !== run) return;
 			run.session = child;
@@ -11849,7 +11959,7 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
-					retry: providerRetryPolicy(this.settingsManager),
+					retry: providerRetryPolicy(this.settingsManager, this.executionBudget, model),
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

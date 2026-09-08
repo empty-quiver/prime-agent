@@ -45,6 +45,12 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
+export {
+	ExecutionBudget,
+	ExecutionBudgetExhaustedError,
+	type ExecutionBudgetLimits,
+	type ExecutionBudgetState,
+} from "./core/execution-budget.js";
 // Extension system
 export type {
 	AgentEndEvent,

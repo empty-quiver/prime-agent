@@ -12,6 +12,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import type { ModelExecutionReservation } from "./execution-governor.js";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -309,6 +310,9 @@ async function runLoop(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<void> {
+	if (config.executionGovernor) {
+		signal = signal ? AbortSignal.any([signal, config.executionGovernor.signal]) : config.executionGovernor.signal;
+	}
 	let firstTurn = true;
 	let lastTurn: Parameters<NonNullable<AgentLoopConfig["getContinuationMessages"]>>[0] | undefined;
 	let pendingMessages: AgentMessage[] = await pollMessagesUnlessAborted(config.getSteeringMessages, signal);
@@ -456,6 +460,7 @@ async function streamAssistantResponse(
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
 	let partialMessage: AssistantMessage | null = null;
+	let reservation: ModelExecutionReservation | undefined;
 	let addedPartial = false;
 	const finishAbortedMessage = async () => {
 		const finalMessage = createAbortedAssistantMessage(config, partialMessage);
@@ -490,6 +495,12 @@ async function streamAssistantResponse(
 			messages: llmMessages,
 			tools: context.tools,
 		};
+		reservation = await config.executionGovernor?.beforeModel({
+			model: config.model,
+			context: llmContext,
+			maxTokens: config.maxTokens,
+		});
+		throwIfAborted(signal);
 
 		const response = await maybePromiseWithAbort(
 			streamFunction(config.model, llmContext, {
@@ -551,6 +562,8 @@ async function streamAssistantResponse(
 							throw error;
 						}
 					}
+					await reservation?.settle(finalMessage);
+					reservation = undefined;
 					if (addedPartial) {
 						context.messages[context.messages.length - 1] = finalMessage;
 					} else {
@@ -566,6 +579,8 @@ async function streamAssistantResponse(
 		}
 
 		const finalMessage = await maybePromiseWithAbort(response.result(), signal);
+		await reservation?.settle(finalMessage);
+		reservation = undefined;
 		if (addedPartial) {
 			context.messages[context.messages.length - 1] = finalMessage;
 		} else {
@@ -575,6 +590,7 @@ async function streamAssistantResponse(
 		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	} catch (error) {
+		await reservation?.settle();
 		if (signal?.aborted && isAbortError(error)) {
 			return finishAbortedMessage();
 		}
@@ -636,7 +652,7 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(preparation, signal, emit, config);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -695,7 +711,7 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(preparation, signal, emit, config);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -828,11 +844,14 @@ async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	config: AgentLoopConfig,
 ): Promise<ExecutedToolCallOutcome> {
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
 
 	try {
+		throwIfAborted(signal);
+		await config.executionGovernor?.beforeTool(prepared.toolCall.id, prepared.toolCall.name);
 		throwIfAborted(signal);
 		const result = await raceWithAbort(
 			prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {

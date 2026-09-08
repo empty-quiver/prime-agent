@@ -9,6 +9,7 @@ import { installAgentTraceUpload } from "./agent-traces.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
+import type { ExecutionBudget, ExecutionBudgetLimits } from "./execution-budget.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
@@ -45,6 +46,9 @@ export interface CreateAgentSessionServicesOptions {
 }
 
 export interface AgentSessionCreationOptions {
+	executionBudget?: ExecutionBudget;
+	executionBudgetLimits?: ExecutionBudgetLimits;
+	executionBudgetPath?: string;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
@@ -265,6 +269,9 @@ export async function createAgentSessionFromServices(
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmIpythonKernel: options.prewarmIpythonKernel,
 		autonomous: options.autonomous,
+		executionBudget: options.executionBudget,
+		executionBudgetLimits: options.executionBudgetLimits,
+		executionBudgetPath: options.executionBudgetPath,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
 	});

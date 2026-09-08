@@ -1,0 +1,2 @@
+- Fixed autonomous model-turn limits inside the execution loop, including failed requests and retries.
+- Added durable shared execution budgets for model requests, tools, deadlines, and explicitly configured token/cost reservations, with restart-persistent exhaustion and conservative accounting for unknown usage.

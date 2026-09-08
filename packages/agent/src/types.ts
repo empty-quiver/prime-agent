@@ -12,6 +12,7 @@ import type {
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { AgentExecutionGovernor } from "./execution-governor.js";
 
 /**
  * Stream function used by the agent loop.
@@ -116,6 +117,7 @@ export interface ShouldStopAfterTurnContext {
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	executionGovernor?: AgentExecutionGovernor;
 	model: Model<any>;
 
 	/**

@@ -4,6 +4,17 @@ This is a development branch, not a production-readiness claim. No supervisor de
 
 ## Implemented in this branch
 
+### Execution admission (workstream 2)
+
+- Agent-core admits model requests and actual tool execution inside the loop, before dispatch. Failed attempts count; a two-turn endless-tool provider cannot obtain a third request.
+- `ExecutionBudget` serializes durable reservations across processes, reconciles successful usage before listeners can attribute child usage, and retains unknown reservations. Restarting with higher requested limits does not replace the saved account or exhaustion.
+- Inline children share the account; hosted children inherit it at publication and persist a relative account reference for recovery. Compaction, refinement, branch-summary retries, kernel host requests, and autonomous quality gates also use admission.
+- Deadlines abort model/tool work and auxiliary operations. Host waits remain bounded even when a provider ignores cancellation.
+- SDK `executionBudgetLimits` configures independent model-request, tool-call, token, cost, and elapsed limits. Explicit autonomous `maxTokens` is a strict reservation cap. The pre-existing **default** 80,000-token continuation target remains a soft target; it is not advertised as a hard cap.
+- Strict token admission conservatively reserves the model's full accepted context plus output ceiling. A cap smaller than this allowance refuses admission. Cost caps require an explicit host-supplied worst-case per-request charge; catalog prices alone are not a guaranteed billing bound. Provider violations exhaust the account and are reported, not concealed.
+
+Still to verify: complete daemon recovery and pre-publication extension paths, copied-family account references, and fault-injection coverage for interrupted ledger writes. These are release gates, not production guarantees.
+
 ### Kernel cancellation (workstream 3)
 
 - Headless execution requests interruption, allows a one-second grace, sends TERM, allows a further second, and escalates to KILL with a five-second exit-confirmation bound.
@@ -27,13 +38,15 @@ Mixed-version warning: an older executable does not understand the new attempt m
 
 ## Remaining work
 
-1. **Authoritative budgets (workstream 2):** one durable host-owned account shared by root, retries and delegated workers. Admit every model request and actual tool execution; reserve concurrent token/cost allowance before dispatch; reconcile usage; conservatively retain reservations on unknown outcomes; persist exhaustion before returning; enforce elapsed deadlines through cancellation. The existing autonomous `maxTurns` defect is not fixed by this branch yet.
+1. **Budget integration release gates (workstream 2):** complete the remaining recovery, pre-publication, and ledger fault checks listed above; review provider request bounds and cancellation cleanup alongside workstreams 3 and 7.
 2. **Explicit waits (workstream 4):** persist typed deadline/job/child conditions and wake generations; end the parent turn without injecting immediate continuations; expose provider deadlines and classify cancellation, timeout, provider failure and worker crash. Retry only when outcome classification permits it.
 3. **Extension timers and memory (workstream 6):** review/adopt upstream #2095 at pinned head `58a3b159b0373bae83553c6884cea581d34f1ea1`, test synchronous/async callback failures and unload ownership, then collect heap profiles with representative transcript length and concurrency. No retained-memory root cause has been established.
 4. **Restart recovery (workstream 7):** durable session identity and one active lease owner; journal operation intent/outcome; reconcile unknown external effects; deduplicate Signal message IDs; use supported idempotency keys; progress-aware health checks; bounded restart backoff; pinned Python dependencies.
 5. **Release gate:** run isolated Linux/ARM64 fault tests, review all cross-worker boundaries, then a 24–48-hour copied-session canary with isolated credentials and external effects. No production deployment until these gates pass.
 
 ## Verification entry points
+
+Budget coverage: `test/suite/execution-budget.test.ts`, `test/suite/agent-session-autonomous.test.ts`, and `test/provider-retry.test.ts` in coding-agent; `test/agent-loop.test.ts` and `test/agent.test.ts` in agent-core. The budget suite includes a three-OS-process admission race and delegated-child accounting.
 
 From `packages/coding-agent`, use the repository's targeted Vitest command on `test/kernel-termination-safety.test.ts`, `test/oauth-refresh-safety.test.ts`, the kernel abort/startup/shutdown/protocol suites, `test/ipython-provisioner.test.ts`, `test/orphan-process-journal.test.ts`, `test/auth-storage.test.ts`, and the three `test/readiness-*.test.ts` acceptance files.
 

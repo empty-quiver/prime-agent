@@ -373,6 +373,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmIpythonKernel: options.prewarmIpythonKernel,
 		autonomous: options.autonomous,
+		executionBudget: options.executionBudget,
+		executionBudgetLimits: options.executionBudgetLimits,
+		executionBudgetPath: options.executionBudgetPath,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
 	});
