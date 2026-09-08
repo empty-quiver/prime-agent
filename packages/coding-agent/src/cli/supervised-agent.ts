@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { verifyPinnedPython } from "../core/kernel/pinned-python.js";
 import { verifySupervisorOwnership } from "../core/kernel/systemd-scope.js";
 import { createAgentSession } from "../core/sdk.js";
 import { SessionManager } from "../core/session-manager.js";
@@ -14,6 +15,9 @@ interface Config {
 	anchor: string;
 	cwd: string;
 	agentDir: string;
+	pythonManifest: string;
+	pythonManifestSha256: string;
+	sourceRoot: string;
 	maxSilentMs?: number;
 	signal?: SignalIntakeConfig;
 }
@@ -50,6 +54,22 @@ try {
 	if (!process.env.PRIME_AGENT_KERNEL_PYTHON || !isAbsolute(process.env.PRIME_AGENT_KERNEL_PYTHON))
 		throw new Error("Supervised execution requires an explicitly provisioned pinned Python runtime");
 	verifySupervisorOwnership();
+	if (
+		![config.pythonManifest, config.sourceRoot].every((value) => typeof value === "string" && isAbsolute(value)) ||
+		typeof config.pythonManifestSha256 !== "string"
+	)
+		throw new Error("Supervisor requires a sealed Python manifest and source root");
+	await notify("WATCHDOG=1", "STATUS=Verifying pinned runtime");
+	await verifyPinnedPython(
+		process.env.PRIME_AGENT_KERNEL_PYTHON,
+		config.pythonManifest,
+		config.pythonManifestSha256,
+		config.sourceRoot,
+		abort.signal,
+	);
+	process.env.PRIME_AGENT_KERNEL_MANIFEST = config.pythonManifest;
+	process.env.PRIME_AGENT_KERNEL_MANIFEST_SHA256 = config.pythonManifestSha256;
+	process.env.PRIME_AGENT_PINNED_SOURCE_ROOT = config.sourceRoot;
 	supervisor = await SessionSupervisor.open(
 		config.anchor,
 		async (file, budget) =>

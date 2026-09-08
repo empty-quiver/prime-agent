@@ -10,7 +10,11 @@ import { createHarness } from "./harness.js";
 
 const execute = promisify(execFile);
 
-it.skipIf(process.platform !== "linux" || !process.env.PRIME_AGENT_SUPERVISOR_UNIT)(
+it.skipIf(
+	process.platform !== "linux" ||
+		!process.env.PRIME_AGENT_SUPERVISOR_UNIT ||
+		!process.env.PRIME_AGENT_TEST_PINNED_PYTHON,
+)(
 	"restarts the actual systemd entrypoint into its anchored session after SIGKILL",
 	async () => {
 		const harness = await createHarness({
@@ -40,9 +44,20 @@ it.skipIf(process.platform !== "linux" || !process.env.PRIME_AGENT_SUPERVISOR_UN
 			const sessionId = harness.session.sessionId;
 			const budgetId = harness.session.executionBudget!.cachedState.id;
 			await harness.session.disposeAsync();
-			writeFileSync(config, JSON.stringify({ anchor, cwd: harness.tempDir, agentDir: harness.tempDir }), {
-				mode: 0o600,
-			});
+			writeFileSync(
+				config,
+				JSON.stringify({
+					anchor,
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					pythonManifest: process.env.PRIME_AGENT_TEST_PYTHON_MANIFEST,
+					pythonManifestSha256: process.env.PRIME_AGENT_TEST_PYTHON_MANIFEST_SHA256,
+					sourceRoot: process.env.PRIME_AGENT_TEST_PINNED_SOURCE_ROOT,
+				}),
+				{
+					mode: 0o600,
+				},
+			);
 			await execute(
 				"systemd-run",
 				[
@@ -61,7 +76,7 @@ it.skipIf(process.platform !== "linux" || !process.env.PRIME_AGENT_SUPERVISOR_UN
 					"/usr/bin/env",
 					"PRIME_AGENT_KERNEL_SYSTEMD=1",
 					`PRIME_AGENT_SUPERVISOR_UNIT=${unit}`,
-					"PRIME_AGENT_KERNEL_PYTHON=/usr/bin/python3",
+					`PRIME_AGENT_KERNEL_PYTHON=${process.env.PRIME_AGENT_TEST_PINNED_PYTHON}`,
 					"PI_SKIP_VERSION_CHECK=1",
 					`PATH=${process.env.PATH}`,
 					process.execPath,

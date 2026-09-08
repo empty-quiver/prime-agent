@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
+import { constants, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,7 @@ import { getPackageDir } from "../../config.js";
 import { isProcessAlive } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
+import { verifyPinnedPython } from "./pinned-python.js";
 
 const BOOTSTRAP_SCHEMA = 9;
 const PYTHON_VERSION = "3.11";
@@ -326,6 +327,9 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 	return [
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
+		process.env.PRIME_AGENT_KERNEL_MANIFEST ?? "",
+		process.env.PRIME_AGENT_KERNEL_MANIFEST_SHA256 ?? "",
+		process.env.PRIME_AGENT_PINNED_SOURCE_ROOT ?? "",
 		process.env.HOME ?? "",
 		process.env.XDG_DATA_HOME ?? "",
 		JSON.stringify(pythonSkills),
@@ -820,6 +824,16 @@ async function ensureKernelPythonUncached(
 	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
 	if (override) {
 		const python = path.resolve(expandHome(override));
+		if (process.env.PRIME_AGENT_KERNEL_MANIFEST) {
+			const root = process.env.PRIME_AGENT_PINNED_SOURCE_ROOT;
+			const digest = process.env.PRIME_AGENT_KERNEL_MANIFEST_SHA256;
+			if (!root || !digest) throw new Error("Pinned Python requires a source root and manifest digest");
+			const manifest = await verifyPinnedPython(python, process.env.PRIME_AGENT_KERNEL_MANIFEST, digest, root);
+			for (const skill of pythonSkills) {
+				if (!manifest.sources[path.relative(realpathSync(root), realpathSync(skill.packagePath))])
+					throw new Error(`Python skill ${skill.importName} is not part of the pinned deployment`);
+			}
+		}
 		const missing: string[] = [];
 		if (!(await hasPrimeAgentRuntime(python))) {
 			missing.push(
@@ -835,6 +849,7 @@ async function ensureKernelPythonUncached(
 		if (missing.length === 0 && pythonSkills.length > 0) {
 			const missingPythonSkills = await missingPythonSkillImportLabels(python, options.pythonSkills ?? []);
 			if (missingPythonSkills.length > 0) {
+				if (process.env.PRIME_AGENT_KERNEL_MANIFEST) throw new Error("Pinned Python skill imports failed");
 				reportProgress(
 					options,
 					`Warning: Python skills unavailable in PRIME_AGENT_KERNEL_PYTHON and will be disabled: ${missingPythonSkills.join(", ")}`,

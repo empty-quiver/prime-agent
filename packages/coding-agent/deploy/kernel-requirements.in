@@ -1,0 +1,18 @@
+# Runtime dependencies come from prime-agent-runtime/pyproject.toml.
+# Keep this list aligned with bootstrap.ts and bundled Python skills.
+dill
+requests
+httpx
+pyyaml
+tomli
+python-dotenv
+pandas
+numpy
+scipy
+beautifulsoup4
+lxml
+pydantic
+tyro
+pillow
+# Local runtime/skill wheels are built without isolated, unpinned build dependencies.
+hatchling

@@ -291,8 +291,11 @@ export class ReplKernelManager {
 
 		let python: string;
 		try {
+			const pinned = Boolean(process.env.PRIME_AGENT_KERNEL_MANIFEST);
+			if (pinned && this.options.python && this.options.python !== process.env.PRIME_AGENT_KERNEL_PYTHON)
+				throw new Error("Kernel Python override differs from the pinned deployment");
 			python =
-				this.options.python ??
+				(!pinned ? this.options.python : undefined) ??
 				(await ensureKernelPython({
 					pythonSkills: this.options.pythonSkills,
 					onProgress: startOptions.onBootstrapProgress,
@@ -312,17 +315,21 @@ export class ReplKernelManager {
 
 		let launched: ReturnType<typeof spawnKernelProcess>;
 		try {
-			launched = spawnKernelProcess(python, ["-m", "rlm.repl"], {
-				cwd: this.options.cwd,
-				// bash.py journals its process groups under this pid so the host can
-				// reap them if the runtime dies without running its shutdown hook.
-				env: {
-					...process.env,
-					...this.options.env,
-					PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+			launched = spawnKernelProcess(
+				python,
+				[...(process.env.PRIME_AGENT_KERNEL_MANIFEST ? ["-I"] : []), "-m", "rlm.repl"],
+				{
+					cwd: this.options.cwd,
+					// bash.py journals its process groups under this pid so the host can
+					// reap them if the runtime dies without running its shutdown hook.
+					env: {
+						...process.env,
+						...this.options.env,
+						PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+					},
+					stdio: ["pipe", "pipe", "pipe"],
 				},
-				stdio: ["pipe", "pipe", "pipe"],
-			});
+			);
 		} catch (error) {
 			liveKernels.delete(this);
 			this.state = "idle";

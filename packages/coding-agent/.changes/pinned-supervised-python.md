@@ -1,0 +1,1 @@
+- Added hash-pinned Linux/ARM64 Python dependencies and sealed runtime verification that rejected interpreter, package, source and environment drift during supervised restart.
